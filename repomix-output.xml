@@ -1,0 +1,5787 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: **/*.swift
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+Fenestra/
+  Fenestra/
+    App/
+      FenestraApp.swift
+    Core/
+      Logging/
+        LocalLog.swift
+      Models/
+        UsageModels.swift
+      Networking/
+        RestrictedHTTPClient.swift
+      Notifications/
+        NotificationManager.swift
+      PaceMath/
+        PaceCalculator.swift
+      Persistence/
+        HistoryStore.swift
+      Settings/
+        AppSettings.swift
+      Store/
+        FenestraStore.swift
+      Support/
+        DateParsing.swift
+        KeychainReader.swift
+        ProcessRunner.swift
+    Providers/
+      Antigravity/
+        AntigravityCloudFallback.swift
+        AntigravityDiscovery.swift
+        AntigravityLocalClient.swift
+        AntigravityModels.swift
+        AntigravityProvider.swift
+      ClaudeCode/
+        ClaudeCacheAnalyzer.swift
+        ClaudeCodeProvider.swift
+        ClaudeCredentialStore.swift
+        ClaudeProjectsWatcher.swift
+        ClaudeStatuslineReader.swift
+      Codex/
+        CodexCredentialStore.swift
+        CodexProvider.swift
+      Cursor/
+        CursorAppAuthStore.swift
+        CursorBrowserCookieStore.swift
+        CursorModels.swift
+        CursorProvider.swift
+        CursorUsageResolver.swift
+      UsageProvider.swift
+    UI/
+      Charts/
+        WindowPanel.swift
+      Dashboard/
+        DashboardView.swift
+        ProviderDashboardContent.swift
+      History/
+        ActivityHistoryView.swift
+      Settings/
+        SettingsView.swift
+  FenestraTests/
+    AppSettingsTests.swift
+    ClaudeCacheAnalyzerTests.swift
+    CursorCookieStoreTests.swift
+    CursorUsageResolverTests.swift
+    HistoryStoreTests.swift
+    PaceCalculatorTests.swift
+    ProviderDateParserTests.swift
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="Fenestra/Fenestra/App/FenestraApp.swift">
+import SwiftUI
+
+@main
+struct FenestraApp: App {
+  @State private var store = FenestraStore()
+
+  var body: some Scene {
+    MenuBarExtra {
+      DashboardView(store: store)
+    } label: {
+      MenuBarGlyph(urgency: store.urgency)
+        .task {
+          await store.start()
+        }
+    }
+    .menuBarExtraStyle(.window)
+
+    Settings {
+      SettingsView(store: store)
+    }
+
+    #if DEBUG
+      Window("Fenestra UI Test", id: "ui-test") {
+        DashboardView(store: store)
+      }
+      .defaultLaunchBehavior(Self.showsUITestWindow ? .presented : .suppressed)
+    #endif
+  }
+
+  #if DEBUG
+    private static var showsUITestWindow: Bool {
+      ProcessInfo.processInfo.environment["FENESTRA_UI_TEST_WINDOW"] == "1"
+    }
+  #endif
+}
+
+private struct MenuBarGlyph: View {
+  let urgency: PaceUrgency
+
+  var body: some View {
+    Image(systemName: symbol)
+      .symbolRenderingMode(.monochrome)
+      .foregroundStyle(color)
+      .accessibilityLabel(accessibilityText)
+  }
+
+  private var symbol: String {
+    switch urgency {
+    case .unknown: "gauge.with.dots.needle.0percent"
+    case .good: "gauge.with.dots.needle.33percent"
+    case .warning: "gauge.with.dots.needle.67percent"
+    case .critical: "gauge.with.dots.needle.100percent"
+    }
+  }
+
+  private var color: Color {
+    switch urgency {
+    case .unknown: .secondary
+    case .good: .green
+    case .warning: .yellow
+    case .critical: .red
+    }
+  }
+
+  private var accessibilityText: String {
+    switch urgency {
+    case .unknown: "Fenestra, pace unknown"
+    case .good: "Fenestra, pace good"
+    case .warning: "Fenestra, pace warning"
+    case .critical: "Fenestra, pace critical"
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Logging/LocalLog.swift">
+import Foundation
+
+enum LocalLog {
+  nonisolated private static let queue = DispatchQueue(
+    label: "dev.fenestra.local-log",
+    qos: .utility
+  )
+
+  nonisolated static var fileURL: URL {
+    HistoryStore.applicationSupportDirectory.appending(path: "fenestra.log")
+  }
+
+  nonisolated static func record(_ message: String) {
+    let timestamp = Date().formatted(.iso8601)
+    let line = "\(timestamp) \(message)\n"
+    queue.async {
+      do {
+        let url = fileURL
+        try FileManager.default.createDirectory(
+          at: url.deletingLastPathComponent(),
+          withIntermediateDirectories: true
+        )
+        rotateIfNeeded(url)
+        if !FileManager.default.fileExists(atPath: url.path) {
+          try Data(line.utf8).write(to: url, options: .atomic)
+          return
+        }
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(line.utf8))
+      } catch {
+        // Local logging is best effort and never falls back to an external service.
+      }
+    }
+  }
+
+  nonisolated private static func rotateIfNeeded(_ url: URL) {
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+      let size = attributes[.size] as? NSNumber,
+      size.intValue > 1_000_000
+    else {
+      return
+    }
+    let old = url.deletingLastPathComponent().appending(path: "fenestra.old.log")
+    try? FileManager.default.removeItem(at: old)
+    try? FileManager.default.moveItem(at: url, to: old)
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Models/UsageModels.swift">
+import Foundation
+
+enum ProviderID: String, CaseIterable, Codable, Identifiable, Sendable {
+  case claudeCode
+  case codex
+  case antigravity
+  case cursor
+
+  var id: String { rawValue }
+
+  var displayName: String {
+    switch self {
+    case .claudeCode: "Claude"
+    case .codex: "Codex"
+    case .antigravity: "Antigravity"
+    case .cursor: "Cursor"
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .claudeCode: "c.square.fill"
+    case .codex: "terminal.fill"
+    case .antigravity: "sparkles"
+    case .cursor: "cursorarrow.rays"
+    }
+  }
+}
+
+enum UsageWindowKind: String, Codable, Sendable {
+  case fiveHour
+  case weekly
+  case monthly
+  case other
+
+  var shortLabel: String {
+    switch self {
+    case .fiveHour: "5h"
+    case .weekly: "Week"
+    case .monthly: "Month"
+    case .other: "Quota"
+    }
+  }
+
+  var knownDuration: TimeInterval? {
+    switch self {
+    case .fiveHour: 5 * 60 * 60
+    case .weekly: 7 * 24 * 60 * 60
+    case .monthly: nil
+    case .other: nil
+    }
+  }
+}
+
+struct UsageBreakdownItem: Codable, Equatable, Identifiable, Sendable {
+  let id: String
+  let label: String
+  let usedPercent: Double
+}
+
+struct UsageWindowSnapshot: Codable, Equatable, Identifiable, Sendable {
+  let id: String
+  let kind: UsageWindowKind
+  let label: String
+  let windowStart: Date?
+  let windowEnd: Date?
+  let quotaTotal: Double
+  let used: Double
+  let remainingPercent: Double
+  let resetSource: String?
+  let breakdown: [UsageBreakdownItem]
+
+  var hasKnownTimeline: Bool {
+    guard let windowStart, let windowEnd else { return false }
+    return windowEnd > windowStart
+  }
+}
+
+struct UsagePoolSnapshot: Codable, Equatable, Identifiable, Sendable {
+  let id: String
+  let name: String
+  let windows: [UsageWindowSnapshot]
+}
+
+struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
+  var id: ProviderID { providerID }
+
+  let providerID: ProviderID
+  let displayName: String
+  let pools: [UsagePoolSnapshot]
+  let freshness: Date
+  let sourceDescription: String
+  let cacheHitRate: Double?
+  let accountDescription: String?
+  let notes: [String]
+}
+
+struct HistoryPoint: Codable, Equatable, Identifiable, Sendable {
+  let id: UUID
+  let providerID: ProviderID
+  let poolID: String
+  let windowID: String
+  let timestamp: Date
+  let remainingPercent: Double
+  let paceDelta: Double?
+
+  init(
+    id: UUID = UUID(),
+    providerID: ProviderID,
+    poolID: String,
+    windowID: String,
+    timestamp: Date,
+    remainingPercent: Double,
+    paceDelta: Double?
+  ) {
+    self.id = id
+    self.providerID = providerID
+    self.poolID = poolID
+    self.windowID = windowID
+    self.timestamp = timestamp
+    self.remainingPercent = remainingPercent
+    self.paceDelta = paceDelta
+  }
+}
+
+struct PaceEvaluation: Equatable, Sendable {
+  let idealRemaining: Double
+  let delta: Double
+  let projectedExhaustion: Date?
+
+  var isOverPace: Bool { delta < 0 }
+
+  var label: String {
+    let amount = abs(delta).rounded()
+    return delta < 0
+      ? "\(amount.formatted(.number.precision(.fractionLength(0))))% over pace"
+      : "\(amount.formatted(.number.precision(.fractionLength(0))))% under pace"
+  }
+}
+
+enum ProviderAvailability: Equatable, Sendable {
+  case idle
+  case loading
+  case available
+  case unavailable(String)
+}
+
+struct ProviderDisplayState: Equatable, Sendable {
+  var snapshot: UsageSnapshot?
+  var availability: ProviderAvailability = .idle
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Networking/RestrictedHTTPClient.swift">
+import Foundation
+
+/// Fenestra has no analytics, telemetry, crash reporting, or cloud sync.
+/// Requests and redirects are rejected unless they target a provider endpoint
+/// explicitly used by Claude Code, Codex, Antigravity, or Cursor.
+enum RestrictedHTTPClient {
+  nonisolated private static let remoteHosts: Set<String> = [
+    "api.anthropic.com",
+    "chatgpt.com",
+    "daily-cloudcode-pa.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+    "cursor.com",
+    "www.cursor.com",
+  ]
+  nonisolated private static let loopbackHosts: Set<String> = [
+    "127.0.0.1",
+    "::1",
+    "localhost",
+  ]
+
+  private static let remoteSession = makeSession(allowUntrustedLoopbackTLS: false)
+  private static let localSession = makeSession(allowUntrustedLoopbackTLS: true)
+
+  static func data(
+    for request: URLRequest,
+    allowUntrustedLoopbackTLS: Bool = false
+  ) async throws -> (Data, HTTPURLResponse) {
+    guard isAllowed(request.url) else {
+      throw ProviderFailure.unavailable("Blocked non-provider network request")
+    }
+
+    let session = allowUntrustedLoopbackTLS ? localSession : remoteSession
+    let (data, response) = try await session.data(for: request)
+    guard let response = response as? HTTPURLResponse else {
+      throw ProviderFailure.invalidResponse("Provider returned a non-HTTP response")
+    }
+    return (data, response)
+  }
+
+  nonisolated static func isAllowed(_ url: URL?) -> Bool {
+    guard let url,
+      let scheme = url.scheme?.lowercased(),
+      let host = url.host?.lowercased()
+    else {
+      return false
+    }
+    if loopbackHosts.contains(host) {
+      return scheme == "http" || scheme == "https"
+    }
+    guard remoteHosts.contains(host), scheme == "https" else {
+      return false
+    }
+    return url.port == nil || url.port == 443
+  }
+
+  private static func makeSession(allowUntrustedLoopbackTLS: Bool) -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.waitsForConnectivity = false
+    configuration.httpShouldSetCookies = false
+    configuration.urlCache = nil
+    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+    return URLSession(
+      configuration: configuration,
+      delegate: RestrictedSessionDelegate(
+        allowUntrustedLoopbackTLS: allowUntrustedLoopbackTLS
+      ),
+      delegateQueue: nil
+    )
+  }
+}
+
+private final class RestrictedSessionDelegate: NSObject, URLSessionTaskDelegate,
+  @unchecked Sendable
+{
+  private let allowUntrustedLoopbackTLS: Bool
+
+  init(allowUntrustedLoopbackTLS: Bool) {
+    self.allowUntrustedLoopbackTLS = allowUntrustedLoopbackTLS
+  }
+
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping @Sendable (URLRequest?) -> Void
+  ) {
+    let originalHost = task.originalRequest?.url?.host?.lowercased()
+    let redirectHost = request.url?.host?.lowercased()
+    guard originalHost == redirectHost, RestrictedHTTPClient.isAllowed(request.url) else {
+      completionHandler(nil)
+      return
+    }
+    completionHandler(request)
+  }
+
+  func urlSession(
+    _ session: URLSession,
+    didReceive challenge: URLAuthenticationChallenge
+  ) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+    let host = challenge.protectionSpace.host.lowercased()
+    guard allowUntrustedLoopbackTLS,
+      host == "127.0.0.1" || host == "::1" || host == "localhost",
+      let trust = challenge.protectionSpace.serverTrust
+    else {
+      return (.performDefaultHandling, nil)
+    }
+    return (.useCredential, URLCredential(trust: trust))
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Notifications/NotificationManager.swift">
+import Foundation
+import UserNotifications
+
+@MainActor
+final class NotificationManager {
+  private var badPaceCounts: [String: Int] = [:]
+  private var deliveredConditions: Set<String> = []
+
+  func requestAuthorizationIfNeeded() async {
+    let center = UNUserNotificationCenter.current()
+    let settings = await center.notificationSettings()
+    guard settings.authorizationStatus == .notDetermined else { return }
+    do {
+      _ = try await center.requestAuthorization(options: [.alert, .sound])
+    } catch {
+      LocalLog.record("Notification authorization failed: \(error.localizedDescription)")
+    }
+  }
+
+  func evaluate(
+    snapshot: UsageSnapshot,
+    history: HistoryStore,
+    settings: AppSettings
+  ) async {
+    guard settings.notificationsEnabled else { return }
+    let center = UNUserNotificationCenter.current()
+    let notificationSettings = await center.notificationSettings()
+    guard
+      notificationSettings.authorizationStatus == .authorized
+        || notificationSettings.authorizationStatus == .provisional
+    else {
+      return
+    }
+
+    for pool in snapshot.pools {
+      for window in pool.windows {
+        let key = "\(snapshot.providerID.rawValue).\(pool.id).\(window.id)"
+        let recent = history.recentPoints(
+          providerID: snapshot.providerID,
+          poolID: pool.id,
+          windowID: window.id,
+          now: snapshot.freshness
+        )
+        let evaluation = PaceCalculator.evaluate(
+          window: window,
+          at: snapshot.freshness,
+          recentHistory: recent
+        )
+        if let evaluation {
+          await evaluateBadPace(
+            key: key,
+            providerName: snapshot.displayName,
+            poolName: pool.name,
+            evaluation: evaluation,
+            threshold: settings.badPaceThreshold,
+            center: center
+          )
+        } else {
+          badPaceCounts[key] = 0
+        }
+
+        await evaluateExhaustion(
+          key: key,
+          providerName: snapshot.displayName,
+          poolName: pool.name,
+          window: window,
+          evaluation: evaluation,
+          timeSensitiveAllowed: notificationSettings.timeSensitiveSetting == .enabled,
+          center: center
+        )
+      }
+    }
+  }
+
+  private func evaluateBadPace(
+    key: String,
+    providerName: String,
+    poolName: String,
+    evaluation: PaceEvaluation,
+    threshold: Double,
+    center: UNUserNotificationCenter
+  ) async {
+    let conditionKey = "pace.\(key)"
+    guard evaluation.delta < threshold else {
+      badPaceCounts[key] = 0
+      deliveredConditions.remove(conditionKey)
+      return
+    }
+    badPaceCounts[key, default: 0] += 1
+    guard badPaceCounts[key, default: 0] >= 2,
+      !deliveredConditions.contains(conditionKey)
+    else {
+      return
+    }
+
+    let content = UNMutableNotificationContent()
+    content.title = "\(providerName) pace"
+    content.body =
+      poolName == "Default"
+      ? evaluation.label
+      : "\(poolName): \(evaluation.label)"
+    content.sound = .default
+    content.interruptionLevel = .active
+    if await add(content, identifier: conditionKey, center: center) {
+      deliveredConditions.insert(conditionKey)
+    }
+  }
+
+  private func evaluateExhaustion(
+    key: String,
+    providerName: String,
+    poolName: String,
+    window: UsageWindowSnapshot,
+    evaluation: PaceEvaluation?,
+    timeSensitiveAllowed: Bool,
+    center: UNUserNotificationCenter
+  ) async {
+    let conditionKey = "exhaustion.\(key)"
+    let exhaustedKey = "exhausted.\(key)"
+    if window.remainingPercent <= 0 {
+      deliveredConditions.remove(conditionKey)
+      guard !deliveredConditions.contains(exhaustedKey) else { return }
+
+      let content = UNMutableNotificationContent()
+      content.title = "\(providerName) quota exhausted"
+      let status = window.windowEnd == nil ? "Quota exhausted" : "Quota exhausted before reset"
+      content.body = poolName == "Default" ? status : "\(poolName): \(status.lowercased())"
+      content.sound = .default
+      content.interruptionLevel = timeSensitiveAllowed ? .timeSensitive : .active
+      if await add(content, identifier: exhaustedKey, center: center) {
+        deliveredConditions.insert(exhaustedKey)
+      }
+      return
+    }
+
+    deliveredConditions.remove(exhaustedKey)
+    guard let exhaustion = evaluation?.projectedExhaustion,
+      let reset = window.windowEnd,
+      exhaustion < reset
+    else {
+      deliveredConditions.remove(conditionKey)
+      return
+    }
+    guard !deliveredConditions.contains(conditionKey) else { return }
+
+    let content = UNMutableNotificationContent()
+    content.title = "\(providerName) may run out"
+    let time = exhaustion.formatted(date: .omitted, time: .shortened)
+    content.body =
+      poolName == "Default"
+      ? "Projected \(time), before reset"
+      : "\(poolName): projected \(time), before reset"
+    content.sound = .default
+    content.interruptionLevel = timeSensitiveAllowed ? .timeSensitive : .active
+    if await add(content, identifier: conditionKey, center: center) {
+      deliveredConditions.insert(conditionKey)
+    }
+  }
+
+  private func add(
+    _ content: UNNotificationContent,
+    identifier: String,
+    center: UNUserNotificationCenter
+  ) async -> Bool {
+    do {
+      try await center.add(
+        UNNotificationRequest(
+          identifier: identifier,
+          content: content,
+          trigger: nil
+        ))
+      return true
+    } catch {
+      guard content.interruptionLevel == .timeSensitive,
+        let fallback = content.mutableCopy() as? UNMutableNotificationContent
+      else {
+        LocalLog.record("Notification delivery failed: \(error.localizedDescription)")
+        return false
+      }
+      fallback.interruptionLevel = .active
+      do {
+        try await center.add(
+          UNNotificationRequest(
+            identifier: identifier,
+            content: fallback,
+            trigger: nil
+          ))
+        return true
+      } catch {
+        LocalLog.record("Notification delivery failed: \(error.localizedDescription)")
+        return false
+      }
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/PaceMath/PaceCalculator.swift">
+import Foundation
+
+enum PaceCalculator {
+  static func idealRemaining(
+    at date: Date,
+    windowStart: Date?,
+    windowEnd: Date?
+  ) -> Double? {
+    guard let windowStart, let windowEnd, windowEnd > windowStart else { return nil }
+    let duration = windowEnd.timeIntervalSince(windowStart)
+    let elapsed = date.timeIntervalSince(windowStart)
+    let progress = min(1, max(0, elapsed / duration))
+    return 100 * (1 - progress)
+  }
+
+  static func delta(
+    remainingPercent: Double,
+    at date: Date,
+    windowStart: Date?,
+    windowEnd: Date?
+  ) -> Double? {
+    guard let ideal = idealRemaining(at: date, windowStart: windowStart, windowEnd: windowEnd)
+    else {
+      return nil
+    }
+    return remainingPercent - ideal
+  }
+
+  static func evaluate(
+    window: UsageWindowSnapshot,
+    at date: Date,
+    recentHistory: [HistoryPoint]
+  ) -> PaceEvaluation? {
+    guard
+      let ideal = idealRemaining(
+        at: date,
+        windowStart: window.windowStart,
+        windowEnd: window.windowEnd
+      )
+    else {
+      return nil
+    }
+
+    return PaceEvaluation(
+      idealRemaining: ideal,
+      delta: window.remainingPercent - ideal,
+      projectedExhaustion: projectedExhaustion(
+        remainingPercent: window.remainingPercent,
+        now: date,
+        recentHistory: recentHistory
+      )
+    )
+  }
+
+  static func projectedExhaustion(
+    remainingPercent: Double,
+    now: Date,
+    recentHistory: [HistoryPoint],
+    lookback: TimeInterval = 60 * 60
+  ) -> Date? {
+    guard remainingPercent > 0 else { return nil }
+    let cutoff = now.addingTimeInterval(-lookback)
+    let samples =
+      recentHistory
+      .filter { $0.timestamp >= cutoff && $0.timestamp <= now }
+      .sorted { $0.timestamp < $1.timestamp }
+    guard let first = samples.first, let last = samples.last, last.timestamp > first.timestamp
+    else {
+      return nil
+    }
+    let consumed = first.remainingPercent - last.remainingPercent
+    guard consumed > 0.05 else { return nil }
+    let ratePerSecond = consumed / last.timestamp.timeIntervalSince(first.timestamp)
+    guard ratePerSecond.isFinite, ratePerSecond > 0 else { return nil }
+    return now.addingTimeInterval(remainingPercent / ratePerSecond)
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Persistence/HistoryStore.swift">
+import Foundation
+import Observation
+
+@Observable
+@MainActor
+final class HistoryStore {
+  private(set) var points: [HistoryPoint] = []
+
+  @ObservationIgnored private let retention: TimeInterval = 90 * 24 * 60 * 60
+  @ObservationIgnored private let minimumSampleInterval: TimeInterval = 10 * 60
+  @ObservationIgnored private let significantChange = 1.0
+  @ObservationIgnored private let fileURL: URL
+
+  init(fileURL: URL? = nil) {
+    self.fileURL = fileURL ?? Self.applicationSupportDirectory.appending(path: "history.json")
+  }
+
+  func loadAndPrune(now: Date = Date()) {
+    do {
+      let data = try Data(contentsOf: fileURL)
+      points = try JSONDecoder().decode([HistoryPoint].self, from: data)
+    } catch CocoaError.fileReadNoSuchFile {
+      points = []
+    } catch {
+      points = []
+      LocalLog.record("History load failed: \(error.localizedDescription)")
+    }
+    _ = prune(now: now)
+    persist()
+  }
+
+  func append(_ snapshot: UsageSnapshot) {
+    var appended = false
+    for pool in snapshot.pools {
+      for window in pool.windows {
+        let pace = PaceCalculator.delta(
+          remainingPercent: window.remainingPercent,
+          at: snapshot.freshness,
+          windowStart: window.windowStart,
+          windowEnd: window.windowEnd
+        )
+        guard
+          shouldAppend(
+            providerID: snapshot.providerID,
+            poolID: pool.id,
+            windowID: window.id,
+            timestamp: snapshot.freshness,
+            remainingPercent: window.remainingPercent
+          )
+        else {
+          continue
+        }
+        points.append(
+          HistoryPoint(
+            providerID: snapshot.providerID,
+            poolID: pool.id,
+            windowID: window.id,
+            timestamp: snapshot.freshness,
+            remainingPercent: window.remainingPercent,
+            paceDelta: pace
+          ))
+        appended = true
+      }
+    }
+    let pruned = prune(now: snapshot.freshness)
+    if appended || pruned {
+      persist()
+    }
+  }
+
+  func points(
+    providerID: ProviderID,
+    poolID: String,
+    windowID: String,
+    since: Date? = nil
+  ) -> [HistoryPoint] {
+    points.filter {
+      guard $0.providerID == providerID,
+        $0.poolID == poolID,
+        $0.windowID == windowID
+      else {
+        return false
+      }
+      guard let since else { return true }
+      return $0.timestamp >= since
+    }
+  }
+
+  func recentPoints(
+    providerID: ProviderID,
+    poolID: String,
+    windowID: String,
+    now: Date,
+    lookback: TimeInterval = 60 * 60
+  ) -> [HistoryPoint] {
+    points(
+      providerID: providerID,
+      poolID: poolID,
+      windowID: windowID,
+      since: now.addingTimeInterval(-lookback)
+    )
+  }
+
+  func dailyActivity(providerID: ProviderID? = nil, days: Int = 90) -> [DailyActivity] {
+    let calendar = Calendar.autoupdatingCurrent
+    let cutoff = calendar.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+    let filtered =
+      points
+      .filter { $0.timestamp >= cutoff && (providerID == nil || $0.providerID == providerID) }
+      .sorted { $0.timestamp < $1.timestamp }
+    var totals: [Date: Double] = [:]
+    var previousByWindow: [String: HistoryPoint] = [:]
+    for point in filtered {
+      let key = "\(point.providerID.rawValue)|\(point.poolID)|\(point.windowID)"
+      if let previous = previousByWindow[key] {
+        let consumed = max(0, previous.remainingPercent - point.remainingPercent)
+        totals[calendar.startOfDay(for: point.timestamp), default: 0] += consumed
+      }
+      previousByWindow[key] = point
+    }
+    return totals.map { DailyActivity(date: $0.key, amount: $0.value) }
+      .sorted { $0.date < $1.date }
+  }
+
+  func dailyWorstPace(providerID: ProviderID? = nil, days: Int = 90) -> [DailyPace] {
+    let calendar = Calendar.autoupdatingCurrent
+    let cutoff = calendar.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
+    var values: [Date: Double] = [:]
+    for point in points
+    where point.timestamp >= cutoff
+      && (providerID == nil || point.providerID == providerID)
+    {
+      guard let delta = point.paceDelta else { continue }
+      let day = calendar.startOfDay(for: point.timestamp)
+      values[day] = min(values[day] ?? delta, delta)
+    }
+    return values.map { DailyPace(date: $0.key, delta: $0.value) }
+      .sorted { $0.date < $1.date }
+  }
+
+  private func shouldAppend(
+    providerID: ProviderID,
+    poolID: String,
+    windowID: String,
+    timestamp: Date,
+    remainingPercent: Double
+  ) -> Bool {
+    guard
+      let last = points.last(where: {
+        $0.providerID == providerID && $0.poolID == poolID && $0.windowID == windowID
+      })
+    else {
+      return true
+    }
+    return timestamp.timeIntervalSince(last.timestamp) >= minimumSampleInterval
+      || abs(remainingPercent - last.remainingPercent) >= significantChange
+  }
+
+  @discardableResult
+  private func prune(now: Date) -> Bool {
+    let cutoff = now.addingTimeInterval(-retention)
+    let previousCount = points.count
+    points.removeAll { $0.timestamp < cutoff }
+    return points.count != previousCount
+  }
+
+  private func persist() {
+    do {
+      try FileManager.default.createDirectory(
+        at: fileURL.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+      )
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys]
+      let data = try encoder.encode(points)
+      try data.write(to: fileURL, options: .atomic)
+    } catch {
+      LocalLog.record("History save failed: \(error.localizedDescription)")
+    }
+  }
+
+  nonisolated static var applicationSupportDirectory: URL {
+    let base =
+      FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+      ?? FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: "Library/Application Support", directoryHint: .isDirectory)
+    return base.appending(path: "Fenestra", directoryHint: .isDirectory)
+  }
+}
+
+struct DailyActivity: Identifiable, Equatable, Sendable {
+  var id: Date { date }
+  let date: Date
+  let amount: Double
+}
+
+struct DailyPace: Identifiable, Equatable, Sendable {
+  var id: Date { date }
+  let date: Date
+  let delta: Double
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Settings/AppSettings.swift">
+import Foundation
+import Observation
+
+enum RefreshCadence: Int, CaseIterable, Identifiable, Sendable {
+  case manual = 0
+  case fortyFiveSeconds = 45
+  case oneMinute = 60
+  case twoMinutes = 120
+  case fiveMinutes = 300
+  case fifteenMinutes = 900
+
+  var id: Int { rawValue }
+
+  var label: String {
+    switch self {
+    case .manual: "Manual"
+    case .fortyFiveSeconds: "45 sec"
+    case .oneMinute: "1 min"
+    case .twoMinutes: "2 min"
+    case .fiveMinutes: "5 min"
+    case .fifteenMinutes: "15 min"
+    }
+  }
+
+  var duration: TimeInterval? {
+    rawValue == 0 ? nil : TimeInterval(rawValue)
+  }
+}
+
+@Observable
+@MainActor
+final class AppSettings {
+  var claudeEnabled = true { didSet { changed() } }
+  var codexEnabled = true { didSet { changed() } }
+  var antigravityEnabled = true { didSet { changed() } }
+  var cursorEnabled = true { didSet { changed() } }
+
+  var claudeCadence: RefreshCadence = .fortyFiveSeconds { didSet { changed() } }
+  var codexCadence: RefreshCadence = .fortyFiveSeconds { didSet { changed() } }
+  var antigravityCadence: RefreshCadence = .oneMinute { didSet { changed() } }
+  var cursorCadence: RefreshCadence = .oneMinute { didSet { changed() } }
+  var claudeCachePollCadence: RefreshCadence = .fiveMinutes { didSet { changed() } }
+  var cursorBrowserAccessEnabled = false { didSet { changed() } }
+
+  var useClaudeWeeklyResetOverride = false {
+    didSet {
+      if useClaudeWeeklyResetOverride, claudeWeeklyResetOverride <= Date() {
+        claudeWeeklyResetOverride = Date().addingTimeInterval(7 * 24 * 60 * 60)
+      }
+      changed()
+    }
+  }
+  var claudeWeeklyResetOverride = Date().addingTimeInterval(7 * 24 * 60 * 60) {
+    didSet { changed() }
+  }
+  var notificationsEnabled = true { didSet { changed() } }
+  var badPaceThreshold = -25.0 { didSet { changed() } }
+
+  @ObservationIgnored private let defaults: UserDefaults
+  @ObservationIgnored private var hasLoaded = false
+  @ObservationIgnored var onChange: (() -> Void)?
+
+  init(defaults: UserDefaults = .standard) {
+    self.defaults = defaults
+  }
+
+  func load() {
+    guard !hasLoaded else { return }
+
+    claudeEnabled = defaults.object(forKey: Keys.claudeEnabled) as? Bool ?? true
+    codexEnabled = defaults.object(forKey: Keys.codexEnabled) as? Bool ?? true
+    antigravityEnabled = defaults.object(forKey: Keys.antigravityEnabled) as? Bool ?? true
+    cursorEnabled = defaults.object(forKey: Keys.cursorEnabled) as? Bool ?? true
+    claudeCadence = cadence(defaults, key: Keys.claudeCadence, fallback: .fortyFiveSeconds)
+    codexCadence = cadence(defaults, key: Keys.codexCadence, fallback: .fortyFiveSeconds)
+    antigravityCadence = cadence(defaults, key: Keys.antigravityCadence, fallback: .oneMinute)
+    cursorCadence = cadence(defaults, key: Keys.cursorCadence, fallback: .oneMinute)
+    claudeCachePollCadence = cadence(
+      defaults,
+      key: Keys.claudeCachePollCadence,
+      fallback: .fiveMinutes
+    )
+    cursorBrowserAccessEnabled =
+      defaults.object(forKey: Keys.cursorBrowserAccessEnabled) as? Bool ?? false
+    useClaudeWeeklyResetOverride =
+      defaults.object(forKey: Keys.useClaudeWeeklyResetOverride) as? Bool ?? false
+    if let date = defaults.object(forKey: Keys.claudeWeeklyResetOverride) as? Date {
+      claudeWeeklyResetOverride = date
+      if date <= Date() {
+        useClaudeWeeklyResetOverride = false
+      }
+    } else if useClaudeWeeklyResetOverride {
+      useClaudeWeeklyResetOverride = false
+    }
+    notificationsEnabled = defaults.object(forKey: Keys.notificationsEnabled) as? Bool ?? true
+    if defaults.object(forKey: Keys.badPaceThreshold) != nil {
+      let storedThreshold = defaults.double(forKey: Keys.badPaceThreshold)
+      if storedThreshold.isFinite {
+        badPaceThreshold = min(-5, max(-75, storedThreshold))
+      }
+    }
+    hasLoaded = true
+  }
+
+  func isEnabled(_ providerID: ProviderID) -> Bool {
+    switch providerID {
+    case .claudeCode: claudeEnabled
+    case .codex: codexEnabled
+    case .antigravity: antigravityEnabled
+    case .cursor: cursorEnabled
+    }
+  }
+
+  func cadence(for providerID: ProviderID) -> RefreshCadence {
+    switch providerID {
+    case .claudeCode: claudeCadence
+    case .codex: codexCadence
+    case .antigravity: antigravityCadence
+    case .cursor: cursorCadence
+    }
+  }
+
+  var enabledProviders: [ProviderID] {
+    ProviderID.allCases.filter(isEnabled)
+  }
+
+  var manualClaudeWeeklyReset: Date? {
+    guard useClaudeWeeklyResetOverride, claudeWeeklyResetOverride > Date() else {
+      return nil
+    }
+    return claudeWeeklyResetOverride
+  }
+
+  private func cadence(
+    _ defaults: UserDefaults,
+    key: String,
+    fallback: RefreshCadence
+  ) -> RefreshCadence {
+    guard defaults.object(forKey: key) != nil else {
+      return fallback
+    }
+    return RefreshCadence(rawValue: defaults.integer(forKey: key)) ?? fallback
+  }
+
+  private func changed() {
+    guard hasLoaded else { return }
+    save()
+    onChange?()
+  }
+
+  private func save() {
+    defaults.set(claudeEnabled, forKey: Keys.claudeEnabled)
+    defaults.set(codexEnabled, forKey: Keys.codexEnabled)
+    defaults.set(antigravityEnabled, forKey: Keys.antigravityEnabled)
+    defaults.set(cursorEnabled, forKey: Keys.cursorEnabled)
+    defaults.set(claudeCadence.rawValue, forKey: Keys.claudeCadence)
+    defaults.set(codexCadence.rawValue, forKey: Keys.codexCadence)
+    defaults.set(antigravityCadence.rawValue, forKey: Keys.antigravityCadence)
+    defaults.set(cursorCadence.rawValue, forKey: Keys.cursorCadence)
+    defaults.set(claudeCachePollCadence.rawValue, forKey: Keys.claudeCachePollCadence)
+    defaults.set(cursorBrowserAccessEnabled, forKey: Keys.cursorBrowserAccessEnabled)
+    defaults.set(useClaudeWeeklyResetOverride, forKey: Keys.useClaudeWeeklyResetOverride)
+    defaults.set(claudeWeeklyResetOverride, forKey: Keys.claudeWeeklyResetOverride)
+    defaults.set(notificationsEnabled, forKey: Keys.notificationsEnabled)
+    defaults.set(badPaceThreshold, forKey: Keys.badPaceThreshold)
+  }
+
+  private enum Keys {
+    static let claudeEnabled = "providers.claude.enabled"
+    static let codexEnabled = "providers.codex.enabled"
+    static let antigravityEnabled = "providers.antigravity.enabled"
+    static let cursorEnabled = "providers.cursor.enabled"
+    static let claudeCadence = "providers.claude.cadence"
+    static let codexCadence = "providers.codex.cadence"
+    static let antigravityCadence = "providers.antigravity.cadence"
+    static let cursorCadence = "providers.cursor.cadence"
+    static let claudeCachePollCadence = "providers.claude.cacheCadence"
+    static let cursorBrowserAccessEnabled = "providers.cursor.browserAccess"
+    static let useClaudeWeeklyResetOverride = "providers.claude.useWeeklyResetOverride"
+    static let claudeWeeklyResetOverride = "providers.claude.weeklyResetOverride"
+    static let notificationsEnabled = "notifications.enabled"
+    static let badPaceThreshold = "notifications.badPaceThreshold"
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Store/FenestraStore.swift">
+import AppKit
+import Foundation
+import Observation
+
+enum PaceUrgency: Comparable, Sendable {
+  case unknown
+  case good
+  case warning
+  case critical
+
+  static func < (lhs: PaceUrgency, rhs: PaceUrgency) -> Bool {
+    rank(lhs) < rank(rhs)
+  }
+
+  private static func rank(_ value: PaceUrgency) -> Int {
+    switch value {
+    case .unknown: 0
+    case .good: 1
+    case .warning: 2
+    case .critical: 3
+    }
+  }
+}
+
+@Observable
+@MainActor
+final class FenestraStore {
+  let settings = AppSettings()
+  let history = HistoryStore()
+
+  private(set) var states: [ProviderID: ProviderDisplayState] = Dictionary(
+    uniqueKeysWithValues: ProviderID.allCases.map { ($0, ProviderDisplayState()) }
+  )
+  var selectedProvider: ProviderID = .claudeCode
+
+  @ObservationIgnored private let notificationManager = NotificationManager()
+  @ObservationIgnored private var providers: [ProviderID: any UsageProvider] = [:]
+  @ObservationIgnored private var pollingTasks: [ProviderID: Task<Void, Never>] = [:]
+  @ObservationIgnored private var activeRefreshes: Set<ProviderID> = []
+  @ObservationIgnored private var pendingRefreshes: Set<ProviderID> = []
+  @ObservationIgnored private var wakeTask: Task<Void, Never>?
+  @ObservationIgnored private var settingsChangeTask: Task<Void, Never>?
+  @ObservationIgnored private var claudeProjectsWatcher: ClaudeProjectsWatcher?
+  @ObservationIgnored private var hasStarted = false
+  @ObservationIgnored private var userSelectedProvider = false
+
+  func start() async {
+    guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+      return
+    }
+    guard !hasStarted else { return }
+    hasStarted = true
+
+    settings.load()
+    history.loadAndPrune()
+    configureProviders()
+    restartClaudeProjectsWatcher()
+    settings.onChange = { [weak self] in
+      self?.settingsDidChange()
+    }
+    if settings.notificationsEnabled {
+      await notificationManager.requestAuthorizationIfNeeded()
+    }
+    startWakeObservation()
+    restartPolling()
+    await refreshAll()
+  }
+
+  func state(for providerID: ProviderID) -> ProviderDisplayState {
+    states[providerID] ?? ProviderDisplayState()
+  }
+
+  func select(_ providerID: ProviderID) {
+    selectedProvider = providerID
+    userSelectedProvider = true
+  }
+
+  func refreshAll() async {
+    let tasks: [Task<Void, Never>] = settings.enabledProviders.map { providerID in
+      Task { [weak self] in
+        guard let self else { return }
+        await self.refresh(providerID)
+      }
+    }
+    for task in tasks {
+      await task.value
+    }
+    chooseUrgentProviderIfNeeded()
+  }
+
+  func refresh(_ providerID: ProviderID) async {
+    guard settings.isEnabled(providerID),
+      let provider = providers[providerID]
+    else {
+      return
+    }
+    guard activeRefreshes.insert(providerID).inserted else {
+      pendingRefreshes.insert(providerID)
+      return
+    }
+    defer {
+      activeRefreshes.remove(providerID)
+      if pendingRefreshes.remove(providerID) != nil {
+        Task { [weak self] in
+          await self?.refresh(providerID)
+        }
+      }
+    }
+
+    var state = states[providerID] ?? ProviderDisplayState()
+    if state.snapshot == nil {
+      state.availability = .loading
+    }
+    states[providerID] = state
+
+    do {
+      let snapshot = try await provider.currentSnapshot()
+      history.append(snapshot)
+      states[providerID] = ProviderDisplayState(
+        snapshot: snapshot,
+        availability: .available
+      )
+      await notificationManager.evaluate(
+        snapshot: snapshot,
+        history: history,
+        settings: settings
+      )
+    } catch {
+      let message =
+        (error as? LocalizedError)?.errorDescription
+        ?? error.localizedDescription
+      LocalLog.record("\(providerID.displayName) refresh failed: \(message)")
+      states[providerID] = ProviderDisplayState(
+        snapshot: state.snapshot,
+        availability: .unavailable(message)
+      )
+    }
+    chooseUrgentProviderIfNeeded()
+  }
+
+  func openAntigravity() async {
+    let bundleIdentifiers = [
+      "com.google.antigravity",
+      "com.google.antigravity-ide",
+    ]
+    guard
+      let applicationURL = bundleIdentifiers.lazy.compactMap({
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
+      }).first
+    else {
+      states[.antigravity] = ProviderDisplayState(
+        availability: .unavailable("Antigravity: app not installed")
+      )
+      return
+    }
+
+    guard NSWorkspace.shared.open(applicationURL) else {
+      states[.antigravity] = ProviderDisplayState(
+        availability: .unavailable("Antigravity: could not open the app")
+      )
+      return
+    }
+
+    states[.antigravity] = ProviderDisplayState(availability: .loading)
+    for delay in [2.0, 3.0, 4.0] {
+      try? await Task.sleep(for: .seconds(delay))
+      guard !Task.isCancelled else { return }
+      await refresh(.antigravity)
+      if states[.antigravity]?.availability == .available {
+        return
+      }
+    }
+  }
+
+  func authorizeClaudeKeychainAccess() async {
+    states[.claudeCode] = ProviderDisplayState(availability: .loading)
+    do {
+      try ClaudeCredentialStore.authorizeKeychainAccess()
+      await refresh(.claudeCode)
+    } catch {
+      let message =
+        (error as? LocalizedError)?.errorDescription
+        ?? error.localizedDescription
+      states[.claudeCode] = ProviderDisplayState(
+        availability: .unavailable(message)
+      )
+    }
+  }
+
+  func authorizeCursorBrowserAccess() async {
+    states[.cursor] = ProviderDisplayState(availability: .loading)
+    do {
+      guard let cursor = providers[.cursor] as? CursorProvider else {
+        throw ProviderFailure.unavailable("Cursor: provider unavailable")
+      }
+      try cursor.authorizeBrowserKeychainAccess()
+      await refresh(.cursor)
+    } catch {
+      let message =
+        (error as? LocalizedError)?.errorDescription
+        ?? error.localizedDescription
+      states[.cursor] = ProviderDisplayState(
+        availability: .unavailable(message)
+      )
+    }
+  }
+
+  func paceEvaluation(
+    providerID: ProviderID,
+    pool: UsagePoolSnapshot,
+    window: UsageWindowSnapshot,
+    at date: Date
+  ) -> PaceEvaluation? {
+    let recent = history.recentPoints(
+      providerID: providerID,
+      poolID: pool.id,
+      windowID: window.id,
+      now: date
+    )
+    return PaceCalculator.evaluate(window: window, at: date, recentHistory: recent)
+  }
+
+  var urgency: PaceUrgency {
+    guard let worst = allPaceDeltas().map(\.delta).min() else { return .unknown }
+    if worst < -25 { return .critical }
+    if worst < -10 { return .warning }
+    return .good
+  }
+
+  var smartSuggestion: String {
+    let deltas = allPaceDeltas()
+    guard !deltas.isEmpty else { return "Pace unknown" }
+    if deltas.allSatisfy({ $0.delta < -10 }) {
+      return "Everything’s tight"
+    }
+    guard let best = deltas.max(by: { $0.delta < $1.delta }) else {
+      return "Pace unknown"
+    }
+    return "\(best.providerID.displayName) has most headroom"
+  }
+
+  func historyPoints(
+    providerID: ProviderID,
+    poolID: String,
+    windowID: String,
+    since: Date?
+  ) -> [HistoryPoint] {
+    history.points(
+      providerID: providerID,
+      poolID: poolID,
+      windowID: windowID,
+      since: since
+    )
+  }
+
+  private func settingsDidChange() {
+    settingsChangeTask?.cancel()
+    settingsChangeTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(300))
+      guard !Task.isCancelled else { return }
+      self?.applySettingsChange()
+    }
+  }
+
+  private func applySettingsChange() {
+    configureProviders()
+    restartClaudeProjectsWatcher()
+    restartPolling()
+    if !settings.isEnabled(selectedProvider) {
+      selectedProvider = settings.enabledProviders.first ?? .claudeCode
+      userSelectedProvider = false
+    }
+    Task {
+      if settings.notificationsEnabled {
+        await notificationManager.requestAuthorizationIfNeeded()
+      }
+      await refreshAll()
+    }
+  }
+
+  private func configureProviders() {
+    let claude = (providers[.claudeCode] as? ClaudeCodeProvider) ?? ClaudeCodeProvider()
+    claude.manualWeeklyReset = settings.manualClaudeWeeklyReset
+    claude.cacheAnalysisInterval = settings.claudeCachePollCadence.duration
+
+    let codex = (providers[.codex] as? CodexProvider) ?? CodexProvider()
+
+    let antigravity =
+      (providers[.antigravity] as? AntigravityProvider)
+      ?? AntigravityProvider()
+
+    let cursor = (providers[.cursor] as? CursorProvider) ?? CursorProvider()
+    cursor.allowBrowserKeychainAccess = settings.cursorBrowserAccessEnabled
+
+    providers = [
+      .claudeCode: claude,
+      .codex: codex,
+      .antigravity: antigravity,
+      .cursor: cursor,
+    ]
+  }
+
+  private func restartPolling() {
+    for task in pollingTasks.values {
+      task.cancel()
+    }
+    pollingTasks.removeAll()
+    for providerID in settings.enabledProviders {
+      guard let interval = settings.cadence(for: providerID).duration else { continue }
+      pollingTasks[providerID] = Task { [weak self] in
+        while !Task.isCancelled {
+          try? await Task.sleep(for: .seconds(interval))
+          guard !Task.isCancelled else { return }
+          await self?.refresh(providerID)
+        }
+      }
+    }
+  }
+
+  private func restartClaudeProjectsWatcher() {
+    claudeProjectsWatcher?.stop()
+    claudeProjectsWatcher = nil
+    guard settings.claudeEnabled else { return }
+    let projectsURL = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: ".claude/projects")
+    let watcher = ClaudeProjectsWatcher(
+      projectsURL: projectsURL,
+      backstopInterval: settings.claudeCachePollCadence.duration
+    ) { [weak self] in
+      Task { @MainActor in
+        await ClaudeCacheAnalyzer.shared.markDirty(projectsURL: projectsURL)
+        await self?.refresh(.claudeCode)
+      }
+    }
+    claudeProjectsWatcher = watcher
+    watcher.start()
+  }
+
+  private func startWakeObservation() {
+    wakeTask?.cancel()
+    wakeTask = Task { [weak self] in
+      for await _ in NSWorkspace.shared.notificationCenter.notifications(
+        named: NSWorkspace.didWakeNotification
+      ) {
+        guard !Task.isCancelled else { return }
+        await self?.refreshAll()
+      }
+    }
+  }
+
+  private func chooseUrgentProviderIfNeeded() {
+    guard !userSelectedProvider else { return }
+    let byProvider = Dictionary(grouping: allPaceDeltas(), by: \.providerID)
+      .compactMapValues { values in values.map(\.delta).min() }
+    if let mostUrgent = byProvider.min(by: { $0.value < $1.value })?.key {
+      selectedProvider = mostUrgent
+    } else if !settings.isEnabled(selectedProvider) {
+      selectedProvider = settings.enabledProviders.first ?? .claudeCode
+    }
+  }
+
+  private func allPaceDeltas() -> [(providerID: ProviderID, delta: Double)] {
+    settings.enabledProviders.flatMap {
+      providerID -> [(providerID: ProviderID, delta: Double)] in
+      guard let snapshot = states[providerID]?.snapshot else { return [] }
+      return snapshot.pools.flatMap { pool in
+        pool.windows.compactMap { window in
+          PaceCalculator.delta(
+            remainingPercent: window.remainingPercent,
+            at: snapshot.freshness,
+            windowStart: window.windowStart,
+            windowEnd: window.windowEnd
+          ).map { (providerID, $0) }
+        }
+      }
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Support/DateParsing.swift">
+import Foundation
+
+enum ProviderDateParser {
+  nonisolated static func date(from value: Any?) -> Date? {
+    if let date = value as? Date {
+      return date
+    }
+    if let number = value as? NSNumber {
+      return epochDate(number.doubleValue)
+    }
+    guard let string = value as? String else { return nil }
+    if let numeric = Double(string) {
+      return epochDate(numeric)
+    }
+
+    let withFractional = ISO8601DateFormatter()
+    withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = withFractional.date(from: string) {
+      return date
+    }
+    let standard = ISO8601DateFormatter()
+    return standard.date(from: string)
+  }
+
+  nonisolated static func epochDate(_ raw: Double) -> Date? {
+    guard raw.isFinite, raw > 0 else { return nil }
+    let seconds = raw > 10_000_000_000 ? raw / 1_000 : raw
+    return Date(timeIntervalSince1970: seconds)
+  }
+
+  nonisolated static func window(
+    endingAt end: Date?,
+    providerDuration: TimeInterval?
+  ) -> (start: Date?, end: Date?) {
+    guard let end, let providerDuration, providerDuration > 0 else {
+      return (nil, end)
+    }
+    return (end.addingTimeInterval(-providerDuration), end)
+  }
+
+  nonisolated static func future(_ date: Date?, after reference: Date) -> Date? {
+    guard let date, date > reference else { return nil }
+    return date
+  }
+
+  nonisolated static func activeWindow(
+    start: Date?,
+    end: Date?,
+    at reference: Date
+  ) -> (start: Date?, end: Date?) {
+    guard let start, let end, start <= reference, end > reference, end > start else {
+      return (nil, nil)
+    }
+    return (start, end)
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Support/KeychainReader.swift">
+import Foundation
+import LocalAuthentication
+import Security
+
+@MainActor
+enum KeychainReader {
+  private struct CacheKey: Hashable {
+    let service: String
+    let account: String?
+  }
+
+  private enum CacheEntry {
+    case value(Data?)
+    case failure(String)
+  }
+
+  private static var cache: [CacheKey: CacheEntry] = [:]
+
+  static func genericPassword(
+    service: String,
+    account: String? = nil,
+    allowInteraction: Bool = false
+  ) throws -> Data? {
+    let cacheKey = CacheKey(service: service, account: account)
+    if let cached = cache[cacheKey] {
+      switch cached {
+      case .value(let data):
+        return data
+      case .failure(let message):
+        throw ProviderFailure.unavailable(message)
+      }
+    }
+
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+      kSecMatchLimit as String: kSecMatchLimitOne,
+      kSecReturnData as String: true,
+    ]
+    if allowInteraction {
+      query[kSecUseAuthenticationContext as String] = LAContext()
+    } else {
+      query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+    }
+    if let account {
+      query[kSecAttrAccount as String] = account
+    }
+
+    var result: AnyObject?
+    let status = SecItemCopyMatching(query as CFDictionary, &result)
+    switch status {
+    case errSecSuccess:
+      let data = result as? Data
+      cache[cacheKey] = .value(data)
+      return data
+    case errSecItemNotFound:
+      cache[cacheKey] = .value(nil)
+      return nil
+    case errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed:
+      let message =
+        allowInteraction
+        ? "Keychain access was not granted"
+        : "Keychain access requires approval"
+      cache[cacheKey] = .failure(message)
+      throw ProviderFailure.unavailable(message)
+    default:
+      let message =
+        "Keychain read failed "
+        + "(\(SecCopyErrorMessageString(status, nil) as String? ?? "\(status)"))"
+      cache[cacheKey] = .failure(message)
+      throw ProviderFailure.unavailable(message)
+    }
+  }
+
+  static func invalidate(service: String, account: String? = nil) {
+    cache.removeValue(forKey: CacheKey(service: service, account: account))
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Core/Support/ProcessRunner.swift">
+import Foundation
+
+struct ProcessResult: Sendable {
+  let stdout: String
+  let stderr: String
+  let terminationStatus: Int32
+}
+
+enum ProcessRunner {
+  static func locate(_ executable: String) -> URL? {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let candidates = [
+      home.appending(path: ".local/bin/\(executable)"),
+      home.appending(path: ".npm-global/bin/\(executable)"),
+      URL(filePath: "/opt/homebrew/bin/\(executable)"),
+      URL(filePath: "/usr/local/bin/\(executable)"),
+      URL(filePath: "/usr/bin/\(executable)"),
+    ]
+    return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+  }
+
+  static func run(
+    executable: URL,
+    arguments: [String],
+    timeout: TimeInterval = 25
+  ) async throws -> ProcessResult {
+    try await withCheckedThrowingContinuation { continuation in
+      let process = Process()
+      let output = Pipe()
+      let errors = Pipe()
+      let outputBuffer = ProcessOutputBuffer()
+      let errorBuffer = ProcessOutputBuffer()
+      process.executableURL = executable
+      process.arguments = arguments
+      process.standardOutput = output
+      process.standardError = errors
+      process.standardInput = FileHandle.nullDevice
+      process.environment = ProcessInfo.processInfo.environment
+      output.fileHandleForReading.readabilityHandler = { handle in
+        outputBuffer.append(handle.availableData)
+      }
+      errors.fileHandleForReading.readabilityHandler = { handle in
+        errorBuffer.append(handle.availableData)
+      }
+
+      let state = ProcessContinuationState(continuation: continuation)
+      process.terminationHandler = { process in
+        output.fileHandleForReading.readabilityHandler = nil
+        errors.fileHandleForReading.readabilityHandler = nil
+        outputBuffer.append((try? output.fileHandleForReading.readToEnd()) ?? Data())
+        errorBuffer.append((try? errors.fileHandleForReading.readToEnd()) ?? Data())
+        state.finish(
+          .success(
+            ProcessResult(
+              stdout: String(decoding: outputBuffer.data, as: UTF8.self),
+              stderr: String(decoding: errorBuffer.data, as: UTF8.self),
+              terminationStatus: process.terminationStatus
+            )))
+      }
+
+      do {
+        try process.run()
+      } catch {
+        state.finish(.failure(error))
+        return
+      }
+
+      DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+        guard process.isRunning else { return }
+        process.terminate()
+        state.finish(
+          .failure(
+            ProviderFailure.unavailable(
+              "\(executable.lastPathComponent) timed out"
+            )))
+      }
+    }
+  }
+}
+
+private final class ProcessOutputBuffer: @unchecked Sendable {
+  private let lock = NSLock()
+  nonisolated(unsafe) private var storage = Data()
+
+  nonisolated func append(_ data: Data) {
+    guard !data.isEmpty else { return }
+    lock.lock()
+    storage.append(data)
+    lock.unlock()
+  }
+
+  nonisolated var data: Data {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+}
+
+private final class ProcessContinuationState: @unchecked Sendable {
+  private let lock = NSLock()
+  nonisolated(unsafe) private var didFinish = false
+  private let continuation: CheckedContinuation<ProcessResult, Error>
+
+  nonisolated init(continuation: CheckedContinuation<ProcessResult, Error>) {
+    self.continuation = continuation
+  }
+
+  nonisolated func finish(_ result: Result<ProcessResult, Error>) {
+    lock.lock()
+    guard !didFinish else {
+      lock.unlock()
+      return
+    }
+    didFinish = true
+    lock.unlock()
+    continuation.resume(with: result)
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Antigravity/AntigravityCloudFallback.swift">
+import Foundation
+
+@MainActor
+enum AntigravityCloudFallback {
+  static func loadToken() throws -> AntigravityKeychainToken {
+    guard
+      let data = try KeychainReader.genericPassword(
+        service: "gemini",
+        account: "antigravity"
+      ),
+      let raw = String(data: data, encoding: .utf8),
+      let decoded = unwrap(raw),
+      let token = parse(decoded)
+    else {
+      throw ProviderFailure.notLoggedIn("Antigravity: open the app and sign in")
+    }
+    if let expiry = token.expiry, expiry.timeIntervalSinceNow <= 60 {
+      throw ProviderFailure.reauthenticationRequired(
+        "Antigravity: session expired — open the app to refresh it"
+      )
+    }
+    return token
+  }
+
+  static func fetchModels(accessToken: String) async throws -> [AntigravityModelQuota] {
+    let hosts = [
+      "https://daily-cloudcode-pa.googleapis.com",
+      "https://cloudcode-pa.googleapis.com",
+    ]
+    var lastStatus: Int?
+    var lastError: Error?
+    for host in hosts {
+      guard let url = URL(string: host + "/v1internal:fetchAvailableModels") else {
+        continue
+      }
+      var request = URLRequest(url: url)
+      request.httpMethod = "POST"
+      request.httpBody = Data("{}".utf8)
+      request.timeoutInterval = 15
+      request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      request.setValue("antigravity", forHTTPHeaderField: "User-Agent")
+      let data: Data
+      let response: HTTPURLResponse
+      do {
+        (data, response) = try await RestrictedHTTPClient.data(for: request)
+      } catch {
+        lastError = error
+        continue
+      }
+      lastStatus = response.statusCode
+      if response.statusCode == 401 || response.statusCode == 403 {
+        throw ProviderFailure.reauthenticationRequired(
+          "Antigravity: session expired — open the app to refresh it"
+        )
+      }
+      guard response.statusCode == 200,
+        let envelope = try? JSONDecoder().decode(
+          AntigravityCloudModelsEnvelope.self,
+          from: data
+        )
+      else {
+        continue
+      }
+      return (envelope.models ?? [:]).compactMap { key, model in
+        guard model.isInternal != true,
+          let quota = model.quotaInfo,
+          let remaining = quota.remainingFraction,
+          remaining.isFinite,
+          (0...1).contains(remaining)
+        else {
+          return nil
+        }
+        let label = model.displayName ?? model.label ?? model.model ?? key
+        return AntigravityModelQuota(
+          label: label,
+          modelID: model.model ?? key,
+          remainingFraction: remaining,
+          resetTime: ProviderDateParser.date(from: quota.resetTime)
+        )
+      }
+    }
+    if let lastError, lastStatus == nil {
+      throw lastError
+    }
+    throw ProviderFailure.unavailable(
+      "Antigravity: Cloud Code unavailable\(lastStatus.map { " (HTTP \($0))" } ?? "")"
+    )
+  }
+
+  private static func unwrap(_ raw: String) -> String? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let prefix = "go-keyring-base64:"
+    guard trimmed.hasPrefix(prefix) else { return trimmed }
+    let base64 = String(trimmed.dropFirst(prefix.count))
+    guard let data = Data(base64Encoded: base64) else { return nil }
+    return String(data: data, encoding: .utf8)
+  }
+
+  private static func parse(_ raw: String) -> AntigravityKeychainToken? {
+    guard let data = raw.data(using: .utf8),
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      return AntigravityKeychainToken(accessToken: raw, expiry: nil)
+    }
+    let token = (root["token"] as? [String: Any]) ?? root
+    let access =
+      token["access_token"] as? String
+      ?? token["accessToken"] as? String
+    let expiry = ProviderDateParser.date(
+      from: token["expiry"] ?? token["expires_at"] ?? token["expiresAt"]
+    )
+    return AntigravityKeychainToken(accessToken: access, expiry: expiry)
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Antigravity/AntigravityDiscovery.swift">
+import Foundation
+
+enum AntigravityDiscovery {
+  static func endpoints() async throws -> [AntigravityEndpoint] {
+    let processResult = try await ProcessRunner.run(
+      executable: URL(filePath: "/bin/ps"),
+      arguments: ["-ax", "-o", "pid=,command="],
+      timeout: 8
+    )
+    guard let process = processInfo(from: processResult.stdout) else {
+      throw ProviderFailure.unavailable("Antigravity: IDE not detected")
+    }
+    let ports = try await listeningPorts(pid: process.pid)
+    guard !ports.isEmpty else {
+      throw ProviderFailure.unavailable("Antigravity: local API port not detected")
+    }
+
+    var endpoints = ports.flatMap { port in
+      [
+        AntigravityEndpoint(scheme: "https", port: port, csrfToken: process.csrfToken),
+        AntigravityEndpoint(scheme: "http", port: port, csrfToken: process.csrfToken),
+      ]
+    }
+    if let extensionPort = process.extensionPort {
+      endpoints.insert(
+        AntigravityEndpoint(
+          scheme: "http",
+          port: extensionPort,
+          csrfToken: process.extensionCSRFToken ?? process.csrfToken
+        ),
+        at: 0
+      )
+    }
+    return endpoints
+  }
+
+  private static func processInfo(from output: String) -> ProcessInfo? {
+    for rawLine in output.split(separator: "\n") {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      let pieces = line.split(
+        separator: " ",
+        maxSplits: 1,
+        omittingEmptySubsequences: true
+      )
+      guard pieces.count == 2, let pid = Int(pieces[0]) else { continue }
+      let command = String(pieces[1])
+      let lower = command.lowercased()
+      let isDesktop =
+        lower.range(
+          of: #"(^|[/\\])language(?:_|-)server(?:[_-][a-z0-9]+)*(?:\.exe)?(\s|$)"#,
+          options: .regularExpression
+        ) != nil
+        && (lower.contains("antigravity")
+          || lower.contains("/extensions/antigravity/"))
+      guard isDesktop else { continue }
+      let csrf = extractFlag("--csrf_token", from: command)
+      if isDesktop, csrf == nil { continue }
+      return ProcessInfo(
+        pid: pid,
+        csrfToken: csrf ?? "",
+        extensionPort: extractFlag("--extension_server_port", from: command).flatMap(Int.init),
+        extensionCSRFToken: extractFlag("--extension_server_csrf_token", from: command)
+      )
+    }
+    return nil
+  }
+
+  private static func extractFlag(_ flag: String, from command: String) -> String? {
+    let escaped = NSRegularExpression.escapedPattern(for: flag)
+    guard
+      let regex = try? NSRegularExpression(
+        pattern: "\(escaped)[=\\s]+([^\\s]+)",
+        options: .caseInsensitive
+      )
+    else {
+      return nil
+    }
+    let range = NSRange(command.startIndex..<command.endIndex, in: command)
+    guard let match = regex.firstMatch(in: command, range: range),
+      let valueRange = Range(match.range(at: 1), in: command)
+    else {
+      return nil
+    }
+    return String(command[valueRange])
+  }
+
+  private static func listeningPorts(pid: Int) async throws -> [Int] {
+    let result = try await ProcessRunner.run(
+      executable: URL(filePath: "/usr/sbin/lsof"),
+      arguments: ["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", String(pid)],
+      timeout: 8
+    )
+    guard let regex = try? NSRegularExpression(pattern: #":(\d+)\s+\(LISTEN\)"#) else {
+      return []
+    }
+    let output = result.stdout
+    let range = NSRange(output.startIndex..<output.endIndex, in: output)
+    var ports: Set<Int> = []
+    regex.enumerateMatches(in: output, range: range) { match, _, _ in
+      guard let match,
+        let portRange = Range(match.range(at: 1), in: output),
+        let port = Int(output[portRange])
+      else {
+        return
+      }
+      ports.insert(port)
+    }
+    return ports.sorted()
+  }
+
+  private struct ProcessInfo {
+    let pid: Int
+    let csrfToken: String
+    let extensionPort: Int?
+    let extensionCSRFToken: String?
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Antigravity/AntigravityLocalClient.swift">
+import Foundation
+
+enum AntigravityLocalClient {
+  private static let service = "exa.language_server_pb.LanguageServerService"
+
+  static func request(
+    endpoint: AntigravityEndpoint,
+    method: String,
+    body: [String: Any]
+  ) async throws -> Data {
+    guard
+      let url = URL(
+        string: "\(endpoint.scheme)://127.0.0.1:\(endpoint.port)/\(service)/\(method)"
+      )
+    else {
+      throw ProviderFailure.invalidResponse("Antigravity: invalid local endpoint")
+    }
+    let payload = try JSONSerialization.data(withJSONObject: body)
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.httpBody = payload
+    request.timeoutInterval = 8
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("1", forHTTPHeaderField: "Connect-Protocol-Version")
+    if !endpoint.csrfToken.isEmpty {
+      request.setValue(endpoint.csrfToken, forHTTPHeaderField: "X-Codeium-Csrf-Token")
+    }
+
+    let (data, response) = try await RestrictedHTTPClient.data(
+      for: request,
+      allowUntrustedLoopbackTLS: endpoint.scheme == "https"
+    )
+    guard response.statusCode == 200 else {
+      throw ProviderFailure.unavailable(
+        "Antigravity: local API returned HTTP \(response.statusCode)"
+      )
+    }
+    return data
+  }
+
+  static var metadataBody: [String: Any] {
+    [
+      "metadata": [
+        "ideName": "antigravity",
+        "extensionName": "antigravity",
+        "ideVersion": "unknown",
+        "locale": "en",
+      ]
+    ]
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Antigravity/AntigravityModels.swift">
+import Foundation
+
+struct AntigravityEndpoint: Sendable {
+  let scheme: String
+  let port: Int
+  let csrfToken: String
+}
+
+struct AntigravityModelQuota: Sendable {
+  let label: String
+  let modelID: String
+  let remainingFraction: Double
+  let resetTime: Date?
+}
+
+struct AntigravityIdentity: Sendable {
+  let email: String?
+  let plan: String?
+}
+
+struct AntigravityKeychainToken: Sendable {
+  let accessToken: String?
+  let expiry: Date?
+}
+
+struct AntigravityQuotaSummaryResponse: Decodable {
+  let response: AntigravityQuotaSummaryPayload?
+  let summary: AntigravityQuotaSummaryPayload?
+  let groups: [AntigravityQuotaGroup]?
+}
+
+struct AntigravityQuotaSummaryPayload: Decodable {
+  let groups: [AntigravityQuotaGroup]
+}
+
+struct AntigravityQuotaGroup: Decodable {
+  let displayName: String?
+  let buckets: [AntigravityQuotaBucket]?
+}
+
+struct AntigravityQuotaBucket: Decodable {
+  let bucketID: String?
+  let displayName: String?
+  let disabled: Bool?
+  let remainingFraction: Double?
+  let remaining: AntigravityRemainingValue?
+  let resetTime: String?
+
+  enum CodingKeys: String, CodingKey {
+    case bucketID = "bucketId"
+    case displayName
+    case disabled
+    case remainingFraction
+    case remaining
+    case resetTime
+  }
+}
+
+struct AntigravityRemainingValue: Decodable {
+  let remainingFraction: Double?
+  let value: Double?
+}
+
+struct AntigravityUserStatusEnvelope: Decodable {
+  let userStatus: AntigravityUserStatus?
+}
+
+struct AntigravityUserStatus: Decodable {
+  let email: String?
+  let userTier: AntigravityTier?
+  let planStatus: AntigravityPlanStatus?
+  let cascadeModelConfigData: AntigravityModelConfigData?
+}
+
+struct AntigravityTier: Decodable {
+  let name: String?
+}
+
+struct AntigravityPlanStatus: Decodable {
+  let planInfo: AntigravityPlanInfo?
+}
+
+struct AntigravityPlanInfo: Decodable {
+  let planName: String?
+  let planDisplayName: String?
+}
+
+struct AntigravityModelConfigData: Decodable {
+  let clientModelConfigs: [AntigravityModelConfig]?
+}
+
+struct AntigravityCommandConfigEnvelope: Decodable {
+  let clientModelConfigs: [AntigravityModelConfig]?
+}
+
+struct AntigravityModelConfig: Decodable {
+  let label: String?
+  let modelOrAlias: AntigravityModelAlias?
+  let quotaInfo: AntigravityQuotaInfo?
+}
+
+struct AntigravityModelAlias: Decodable {
+  let model: String?
+}
+
+struct AntigravityQuotaInfo: Decodable {
+  let remainingFraction: Double?
+  let resetTime: String?
+}
+
+struct AntigravityCloudModelsEnvelope: Decodable {
+  let models: [String: AntigravityCloudModel]?
+}
+
+struct AntigravityCloudModel: Decodable {
+  let model: String?
+  let displayName: String?
+  let label: String?
+  let isInternal: Bool?
+  let quotaInfo: AntigravityQuotaInfo?
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Antigravity/AntigravityProvider.swift">
+import Foundation
+
+@MainActor
+final class AntigravityProvider: UsageProvider {
+  let id: ProviderID = .antigravity
+  let displayName = "Antigravity"
+
+  func currentSnapshot() async throws -> UsageSnapshot {
+    do {
+      let endpoints = try await AntigravityDiscovery.endpoints()
+      if let snapshot = try await fetchLocal(endpoints: endpoints) {
+        return snapshot
+      }
+    } catch {
+      LocalLog.record("Antigravity local discovery failed: \(error.localizedDescription)")
+    }
+
+    let token = try AntigravityCloudFallback.loadToken()
+    guard let accessToken = token.accessToken, !accessToken.isEmpty else {
+      throw ProviderFailure.notLoggedIn("Antigravity: open the app and sign in")
+    }
+    let models = try await AntigravityCloudFallback.fetchModels(accessToken: accessToken)
+    guard !models.isEmpty,
+      let snapshot = snapshotFromModels(
+        models,
+        identity: nil,
+        source: "Google Cloud Code"
+      )
+    else {
+      throw ProviderFailure.invalidResponse("Antigravity: no quota models returned")
+    }
+    return snapshot
+  }
+
+  private func fetchLocal(endpoints: [AntigravityEndpoint]) async throws -> UsageSnapshot? {
+    var lastError: Error?
+    for endpoint in endpoints {
+      do {
+        let quotaData = try await AntigravityLocalClient.request(
+          endpoint: endpoint,
+          method: "RetrieveUserQuotaSummary",
+          body: ["forceRefresh": true]
+        )
+        if let snapshot = try parseQuotaSummary(quotaData) {
+          return snapshot
+        }
+      } catch {
+        lastError = error
+      }
+
+      do {
+        let statusData = try await AntigravityLocalClient.request(
+          endpoint: endpoint,
+          method: "GetUserStatus",
+          body: AntigravityLocalClient.metadataBody
+        )
+        if let parsed = parseUserStatus(statusData), !parsed.models.isEmpty {
+          if let snapshot = snapshotFromModels(
+            parsed.models,
+            identity: parsed.identity,
+            source: "Antigravity local RPC"
+          ) {
+            return snapshot
+          }
+        }
+      } catch {
+        lastError = error
+      }
+
+      do {
+        let configData = try await AntigravityLocalClient.request(
+          endpoint: endpoint,
+          method: "GetCommandModelConfigs",
+          body: AntigravityLocalClient.metadataBody
+        )
+        if let envelope = try? JSONDecoder().decode(
+          AntigravityCommandConfigEnvelope.self,
+          from: configData
+        ) {
+          let models = quotas(from: envelope.clientModelConfigs ?? [])
+          if !models.isEmpty,
+            let snapshot = snapshotFromModels(
+              models,
+              identity: nil,
+              source: "Antigravity model-config RPC"
+            )
+          {
+            return snapshot
+          }
+        }
+      } catch {
+        lastError = error
+      }
+    }
+    if let lastError { throw lastError }
+    return nil
+  }
+
+  private func parseQuotaSummary(_ data: Data) throws -> UsageSnapshot? {
+    let envelope = try JSONDecoder().decode(AntigravityQuotaSummaryResponse.self, from: data)
+    let groups = envelope.response?.groups ?? envelope.summary?.groups ?? envelope.groups ?? []
+    let freshness = Date()
+    var windowsByPool: [String: [UsageWindowSnapshot]] = [:]
+    for (groupIndex, group) in groups.enumerated() {
+      for (bucketIndex, bucket) in (group.buckets ?? []).enumerated() {
+        guard bucket.disabled != true else { continue }
+        let remaining =
+          bucket.remainingFraction
+          ?? bucket.remaining?.remainingFraction
+          ?? bucket.remaining?.value
+        guard let remaining, remaining.isFinite, (0...1).contains(remaining) else { continue }
+        let combined = "\(bucket.bucketID ?? "") \(bucket.displayName ?? "")".lowercased()
+        let name = poolName("\(group.displayName ?? "") \(combined)")
+        let kind: UsageWindowKind
+        if combined.contains("5h")
+          || combined.contains("5-hour")
+          || combined.contains("five hour")
+        {
+          kind = .fiveHour
+        } else if combined.contains("week") {
+          kind = .weekly
+        } else {
+          kind = .other
+        }
+        let end = ProviderDateParser.future(
+          ProviderDateParser.date(from: bucket.resetTime),
+          after: freshness
+        )
+        let timeline = ProviderDateParser.window(
+          endingAt: end,
+          providerDuration: kind.knownDuration
+        )
+        let fallbackID = "\(bucket.displayName ?? kind.rawValue)-\(groupIndex)-\(bucketIndex)"
+        let bucketID = bucket.bucketID ?? fallbackID
+        windowsByPool[name, default: []].append(
+          UsageWindowSnapshot(
+            id: "antigravity-\(poolID(for: name))-\(bucketID)",
+            kind: kind,
+            label: bucket.displayName ?? kind.shortLabel,
+            windowStart: timeline.start,
+            windowEnd: timeline.end,
+            quotaTotal: 100,
+            used: (1 - remaining) * 100,
+            remainingPercent: remaining * 100,
+            resetSource: end == nil ? nil : "Antigravity quota RPC",
+            breakdown: []
+          ))
+      }
+    }
+    let pools = ["Gemini", "Claude/GPT-OSS"].compactMap { name -> UsagePoolSnapshot? in
+      guard let windows = windowsByPool[name], !windows.isEmpty else { return nil }
+      return UsagePoolSnapshot(id: poolID(for: name), name: name, windows: windows)
+    }
+    guard !pools.isEmpty else { return nil }
+    return UsageSnapshot(
+      providerID: .antigravity,
+      displayName: displayName,
+      pools: pools,
+      freshness: freshness,
+      sourceDescription: "Antigravity quota RPC",
+      cacheHitRate: nil,
+      accountDescription: nil,
+      notes: timelineNotes(for: pools)
+    )
+  }
+
+  private func parseUserStatus(
+    _ data: Data
+  ) -> (models: [AntigravityModelQuota], identity: AntigravityIdentity)? {
+    guard
+      let envelope = try? JSONDecoder().decode(
+        AntigravityUserStatusEnvelope.self,
+        from: data
+      ),
+      let status = envelope.userStatus
+    else {
+      return nil
+    }
+    let plan =
+      status.userTier?.name
+      ?? status.planStatus?.planInfo?.planDisplayName
+      ?? status.planStatus?.planInfo?.planName
+    return (
+      quotas(from: status.cascadeModelConfigData?.clientModelConfigs ?? []),
+      AntigravityIdentity(email: status.email, plan: plan)
+    )
+  }
+
+  private func quotas(from models: [AntigravityModelConfig]) -> [AntigravityModelQuota] {
+    models.compactMap { model in
+      guard let quota = model.quotaInfo,
+        let fraction = quota.remainingFraction,
+        fraction.isFinite,
+        (0...1).contains(fraction)
+      else {
+        return nil
+      }
+      let id = model.modelOrAlias?.model ?? model.label ?? "unknown"
+      return AntigravityModelQuota(
+        label: model.label ?? id,
+        modelID: id,
+        remainingFraction: fraction,
+        resetTime: ProviderDateParser.date(from: quota.resetTime)
+      )
+    }
+  }
+
+  private func snapshotFromModels(
+    _ models: [AntigravityModelQuota],
+    identity: AntigravityIdentity?,
+    source: String
+  ) -> UsageSnapshot? {
+    let freshness = Date()
+    let visibleModels = models.filter {
+      !$0.modelID.localizedCaseInsensitiveContains("placeholder")
+        && !$0.label.localizedCaseInsensitiveContains("placeholder")
+    }
+    var grouped: [String: [AntigravityModelQuota]] = [:]
+    for model in visibleModels {
+      let name = poolName("\(model.label) \(model.modelID)")
+      grouped[name, default: []].append(model)
+    }
+    let pools = ["Gemini", "Claude/GPT-OSS"].compactMap { name -> UsagePoolSnapshot? in
+      guard let candidates = grouped[name],
+        let representative = candidates.min(by: { lhs, rhs in
+          if lhs.remainingFraction != rhs.remainingFraction {
+            return lhs.remainingFraction < rhs.remainingFraction
+          }
+          if lhs.resetTime != nil, rhs.resetTime == nil {
+            return true
+          }
+          return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+        })
+      else {
+        return nil
+      }
+      let resetTime = ProviderDateParser.future(
+        representative.resetTime,
+        after: freshness
+      )
+      let timeline = ProviderDateParser.window(
+        endingAt: resetTime,
+        providerDuration: UsageWindowKind.fiveHour.knownDuration
+      )
+      let window = UsageWindowSnapshot(
+        id: name == "Gemini" ? "antigravity-gemini-five-hour" : "antigravity-claude-five-hour",
+        kind: .fiveHour,
+        label: "5-hour",
+        windowStart: timeline.start,
+        windowEnd: timeline.end,
+        quotaTotal: 100,
+        used: (1 - representative.remainingFraction) * 100,
+        remainingPercent: representative.remainingFraction * 100,
+        resetSource: resetTime == nil ? nil : source,
+        breakdown: []
+      )
+      return UsagePoolSnapshot(
+        id: name == "Gemini" ? "gemini" : "claude-gpt",
+        name: name,
+        windows: [window]
+      )
+    }
+    guard !pools.isEmpty else { return nil }
+    return UsageSnapshot(
+      providerID: .antigravity,
+      displayName: displayName,
+      pools: pools,
+      freshness: freshness,
+      sourceDescription: source,
+      cacheHitRate: nil,
+      accountDescription: [identity?.email, identity?.plan].compactMap(\.self)
+        .joined(separator: " · "),
+      notes: timelineNotes(for: pools)
+    )
+  }
+
+  private func poolName(_ text: String) -> String {
+    let normalized = text.lowercased()
+    if normalized.contains("gemini") {
+      return "Gemini"
+    }
+    return "Claude/GPT-OSS"
+  }
+
+  private func poolID(for name: String) -> String {
+    name == "Gemini" ? "gemini" : "claude-gpt"
+  }
+
+  private func timelineNotes(for pools: [UsagePoolSnapshot]) -> [String] {
+    let windows = pools.flatMap(\.windows)
+    if windows.contains(where: { $0.windowEnd == nil }) {
+      return ["Reset time unknown"]
+    }
+    if windows.contains(where: { !$0.hasKnownTimeline }) {
+      return ["Window start unknown"]
+    }
+    return []
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/ClaudeCode/ClaudeCacheAnalyzer.swift">
+import Foundation
+
+struct ClaudeCacheAnalysis: Sendable {
+  let hitRate: Double?
+}
+
+actor ClaudeCacheAnalyzer {
+  static let shared = ClaudeCacheAnalyzer()
+  private static let recentFileLimit = 50
+  private static let bytesPerFileLimit = 1_000_000
+  private static let recencyLimit: TimeInterval = 30 * 24 * 60 * 60
+
+  private struct FileStamp: Equatable {
+    let modificationDate: Date
+    let size: Int
+  }
+
+  private struct UsageRecord {
+    let uuid: String?
+    let cacheRead: Double
+    let cacheCreation: Double
+    let input: Double
+  }
+
+  private struct CachedFile {
+    let stamp: FileStamp
+    let records: [UsageRecord]
+  }
+
+  private var rootURL: URL?
+  private var cachedFiles: [URL: CachedFile] = [:]
+  private var latestAnalysis = ClaudeCacheAnalysis(hitRate: nil)
+  private var isAnalyzing = false
+  private var isDirty = true
+  private var lastAnalysisDate: Date?
+
+  func cachedAnalysisSchedulingRefresh(
+    projectsURL: URL,
+    minimumInterval: TimeInterval?
+  ) -> ClaudeCacheAnalysis {
+    if rootURL != projectsURL {
+      rootURL = projectsURL
+      cachedFiles.removeAll()
+      latestAnalysis = ClaudeCacheAnalysis(hitRate: nil)
+      isDirty = true
+      lastAnalysisDate = nil
+    }
+    let current = latestAnalysis
+    let intervalElapsed =
+      minimumInterval.map { interval in
+        lastAnalysisDate.map { Date().timeIntervalSince($0) >= interval } ?? true
+      } ?? (lastAnalysisDate == nil)
+    if !isAnalyzing, isDirty || intervalElapsed {
+      isAnalyzing = true
+      isDirty = false
+      Task { [weak self] in
+        await self?.performScheduledAnalysis(projectsURL: projectsURL)
+      }
+    }
+    return current
+  }
+
+  func markDirty(projectsURL: URL) {
+    if rootURL != projectsURL {
+      rootURL = projectsURL
+      cachedFiles.removeAll()
+      latestAnalysis = ClaudeCacheAnalysis(hitRate: nil)
+      lastAnalysisDate = nil
+    }
+    isDirty = true
+  }
+
+  func analyze(projectsURL: URL) -> ClaudeCacheAnalysis {
+    if rootURL != projectsURL {
+      rootURL = projectsURL
+      cachedFiles.removeAll()
+    }
+    guard
+      let enumerator = FileManager.default.enumerator(
+        at: projectsURL,
+        includingPropertiesForKeys: [
+          .isRegularFileKey,
+          .contentModificationDateKey,
+          .fileSizeKey,
+        ],
+        options: [.skipsHiddenFiles]
+      )
+    else {
+      cachedFiles.removeAll()
+      latestAnalysis = ClaudeCacheAnalysis(hitRate: nil)
+      return latestAnalysis
+    }
+
+    let cutoff = Date().addingTimeInterval(-Self.recencyLimit)
+    var candidates: [(url: URL, stamp: FileStamp)] = []
+    for case let fileURL as URL in enumerator where fileURL.pathExtension == "jsonl" {
+      guard
+        let values = try? fileURL.resourceValues(
+          forKeys: [
+            .isRegularFileKey,
+            .contentModificationDateKey,
+            .fileSizeKey,
+          ]
+        ),
+        values.isRegularFile == true,
+        let modificationDate = values.contentModificationDate,
+        modificationDate >= cutoff
+      else {
+        continue
+      }
+      candidates.append(
+        (
+          fileURL,
+          FileStamp(
+            modificationDate: modificationDate,
+            size: values.fileSize ?? 0
+          )
+        ))
+    }
+    candidates.sort {
+      if $0.stamp.modificationDate != $1.stamp.modificationDate {
+        return $0.stamp.modificationDate > $1.stamp.modificationDate
+      }
+      return $0.url.path < $1.url.path
+    }
+
+    var currentFiles: Set<URL> = []
+    for candidate in candidates.prefix(Self.recentFileLimit) {
+      let fileURL = candidate.url
+      let stamp = candidate.stamp
+      currentFiles.insert(fileURL)
+      if cachedFiles[fileURL]?.stamp != stamp {
+        cachedFiles[fileURL] = CachedFile(
+          stamp: stamp,
+          records: Self.records(in: fileURL)
+        )
+      }
+    }
+    cachedFiles = cachedFiles.filter { currentFiles.contains($0.key) }
+
+    var seenUUIDs: Set<String> = []
+    var cacheRead = 0.0
+    var cacheCreation = 0.0
+    var input = 0.0
+
+    for fileURL in cachedFiles.keys.sorted(by: { $0.path < $1.path }) {
+      for record in cachedFiles[fileURL]?.records ?? [] {
+        if let uuid = record.uuid, !seenUUIDs.insert(uuid).inserted {
+          continue
+        }
+        cacheRead += record.cacheRead
+        cacheCreation += record.cacheCreation
+        input += record.input
+      }
+    }
+
+    let denominator = cacheRead + cacheCreation + input
+    latestAnalysis = ClaudeCacheAnalysis(
+      hitRate: denominator > 0 ? cacheRead / denominator * 100 : nil
+    )
+    lastAnalysisDate = Date()
+    isDirty = false
+    return latestAnalysis
+  }
+
+  private func performScheduledAnalysis(projectsURL: URL) {
+    _ = analyze(projectsURL: projectsURL)
+    isAnalyzing = false
+  }
+
+  private nonisolated static func records(in fileURL: URL) -> [UsageRecord] {
+    guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+      return []
+    }
+    defer { try? handle.close() }
+    guard let fileSize = try? handle.seekToEnd() else { return [] }
+    let start =
+      fileSize > UInt64(bytesPerFileLimit)
+      ? fileSize - UInt64(bytesPerFileLimit)
+      : 0
+    do {
+      try handle.seek(toOffset: start)
+    } catch {
+      return []
+    }
+    guard var data = try? handle.readToEnd(), !data.isEmpty else { return [] }
+    if start > 0 {
+      guard let newline = data.firstIndex(of: 0x0A) else { return [] }
+      data.removeSubrange(data.startIndex...newline)
+    }
+    guard let text = String(data: data, encoding: .utf8)
+    else {
+      return []
+    }
+    return text.split(separator: "\n").compactMap { line in
+      guard let lineData = line.data(using: .utf8),
+        let object = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any]
+      else {
+        return nil
+      }
+      let message = object["message"] as? [String: Any]
+      guard
+        let usage =
+          (message?["usage"] as? [String: Any])
+          ?? (object["usage"] as? [String: Any])
+      else {
+        return nil
+      }
+      return UsageRecord(
+        uuid: object["uuid"] as? String,
+        cacheRead: number(
+          usage["cache_read_input_tokens"] ?? usage["cacheReadInputTokens"]
+        ),
+        cacheCreation: number(
+          usage["cache_creation_input_tokens"] ?? usage["cacheCreationInputTokens"]
+        ),
+        input: number(usage["input_tokens"] ?? usage["inputTokens"])
+      )
+    }
+  }
+
+  nonisolated private static func number(_ value: Any?) -> Double {
+    let parsed: Double?
+    if let number = value as? NSNumber {
+      parsed = number.doubleValue
+    } else if let string = value as? String {
+      parsed = Double(string)
+    } else {
+      parsed = nil
+    }
+    guard let parsed, parsed.isFinite, parsed >= 0 else { return 0 }
+    return parsed
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/ClaudeCode/ClaudeCodeProvider.swift">
+import Foundation
+
+@MainActor
+final class ClaudeCodeProvider: UsageProvider {
+  let id: ProviderID = .claudeCode
+  let displayName = "Claude"
+
+  var manualWeeklyReset: Date?
+  var cacheAnalysisInterval: TimeInterval?
+
+  private let projectsURL = FileManager.default.homeDirectoryForCurrentUser
+    .appending(path: ".claude/projects")
+
+  func currentSnapshot() async throws -> UsageSnapshot {
+    let statusline = ClaudeStatuslineReader.read()
+    if let statusline,
+      Date().timeIntervalSince(statusline.freshness) <= 90
+    {
+      return await enrichedSnapshot(
+        fiveHourUsed: statusline.fiveHourUsedPercent,
+        fiveHourReset: statusline.fiveHourReset,
+        weeklyUsed: statusline.weeklyUsedPercent,
+        weeklyReset: statusline.weeklyReset ?? manualWeeklyReset,
+        freshness: statusline.freshness,
+        source: "Claude statusline",
+        account: nil
+      )
+    }
+
+    do {
+      let (usage, credentials) = try await authenticatedUsage()
+      return await enrichedSnapshot(
+        fiveHourUsed: usage.fiveHour?.utilization,
+        fiveHourReset: ProviderDateParser.date(from: usage.fiveHour?.resetsAt),
+        weeklyUsed: usage.sevenDay?.utilization,
+        weeklyReset: ProviderDateParser.date(from: usage.sevenDay?.resetsAt)
+          ?? manualWeeklyReset,
+        freshness: Date(),
+        source: "Anthropic OAuth",
+        account: credentials.source
+      )
+    } catch {
+      guard let statusline else { throw error }
+      return await enrichedSnapshot(
+        fiveHourUsed: statusline.fiveHourUsedPercent,
+        fiveHourReset: statusline.fiveHourReset,
+        weeklyUsed: statusline.weeklyUsedPercent,
+        weeklyReset: statusline.weeklyReset ?? manualWeeklyReset,
+        freshness: statusline.freshness,
+        source: "Claude statusline fallback",
+        account: nil
+      )
+    }
+  }
+
+  private func authenticatedUsage() async throws -> (ClaudeUsageResponse, ClaudeCredentials) {
+    let credentials = try ClaudeCredentialStore.load()
+    do {
+      let usage = try await fetchUsage(accessToken: credentials.accessToken)
+      return (usage, credentials)
+    } catch ClaudeAPIError.unauthorized {
+      throw ProviderFailure.reauthenticationRequired(
+        "Claude: OAuth session expired — run `claude auth login --claudeai`"
+      )
+    }
+  }
+
+  private func fetchUsage(accessToken: String) async throws -> ClaudeUsageResponse {
+    guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
+      throw ProviderFailure.invalidResponse("Claude: invalid usage endpoint")
+    }
+    var request = URLRequest(url: url)
+    request.httpMethod = "GET"
+    request.timeoutInterval = 30
+    request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+    request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
+    let (data, response) = try await RestrictedHTTPClient.data(for: request)
+    switch response.statusCode {
+    case 200:
+      do {
+        let usage = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
+        let values = [
+          usage.fiveHour?.utilization,
+          usage.sevenDay?.utilization,
+        ].compactMap(\.self)
+        guard !values.isEmpty,
+          values.allSatisfy({ $0.isFinite && (0...100).contains($0) })
+        else {
+          throw ProviderFailure.invalidResponse("Claude: invalid usage values")
+        }
+        return usage
+      } catch {
+        if let failure = error as? ProviderFailure {
+          throw failure
+        }
+        throw ProviderFailure.invalidResponse("Claude: unexpected usage response")
+      }
+    case 401:
+      throw ClaudeAPIError.unauthorized
+    case 429:
+      throw ProviderFailure.unavailable("Claude: usage API rate limited")
+    default:
+      throw ProviderFailure.unavailable("Claude: usage API returned HTTP \(response.statusCode)")
+    }
+  }
+
+  private func enrichedSnapshot(
+    fiveHourUsed: Double?,
+    fiveHourReset: Date?,
+    weeklyUsed: Double?,
+    weeklyReset: Date?,
+    freshness: Date,
+    source: String,
+    account: String? = nil
+  ) async -> UsageSnapshot {
+    let cacheAnalysis = await ClaudeCacheAnalyzer.shared.cachedAnalysisSchedulingRefresh(
+      projectsURL: projectsURL,
+      minimumInterval: cacheAnalysisInterval
+    )
+    return snapshot(
+      fiveHourUsed: fiveHourUsed,
+      fiveHourReset: fiveHourReset,
+      weeklyUsed: weeklyUsed,
+      weeklyReset: weeklyReset,
+      freshness: freshness,
+      source: source,
+      cacheHitRate: cacheAnalysis.hitRate,
+      account: account
+    )
+  }
+
+  private func snapshot(
+    fiveHourUsed: Double?,
+    fiveHourReset: Date?,
+    weeklyUsed: Double?,
+    weeklyReset: Date?,
+    freshness: Date,
+    source: String,
+    cacheHitRate: Double?,
+    account: String?
+  ) -> UsageSnapshot {
+    let now = Date()
+    let effectiveFiveHourReset = ProviderDateParser.future(fiveHourReset, after: now)
+    let effectiveWeeklyReset = ProviderDateParser.future(weeklyReset, after: now)
+    var windows: [UsageWindowSnapshot] = []
+    if let fiveHourUsed {
+      let timeline = ProviderDateParser.window(
+        endingAt: effectiveFiveHourReset,
+        providerDuration: UsageWindowKind.fiveHour.knownDuration
+      )
+      windows.append(
+        UsageWindowSnapshot(
+          id: "claude-five-hour",
+          kind: .fiveHour,
+          label: "5-hour",
+          windowStart: timeline.start,
+          windowEnd: timeline.end,
+          quotaTotal: 100,
+          used: fiveHourUsed,
+          remainingPercent: 100 - fiveHourUsed,
+          resetSource: effectiveFiveHourReset == nil ? nil : source,
+          breakdown: []
+        ))
+    }
+    if let weeklyUsed {
+      let timeline = ProviderDateParser.window(
+        endingAt: effectiveWeeklyReset,
+        providerDuration: UsageWindowKind.weekly.knownDuration
+      )
+      let isManual =
+        effectiveWeeklyReset == manualWeeklyReset
+        && manualWeeklyReset != nil
+      windows.append(
+        UsageWindowSnapshot(
+          id: "claude-weekly",
+          kind: .weekly,
+          label: "Weekly",
+          windowStart: timeline.start,
+          windowEnd: timeline.end,
+          quotaTotal: 100,
+          used: weeklyUsed,
+          remainingPercent: 100 - weeklyUsed,
+          resetSource:
+            effectiveWeeklyReset == nil ? nil : (isManual ? "Manual override" : source),
+          breakdown: []
+        ))
+    }
+
+    var notes: [String] = []
+    if isClaudePeakWindow() {
+      notes.append("Peak window · eases 11am PT")
+    }
+    if windows.contains(where: { !$0.hasKnownTimeline }) {
+      notes.append("Reset time unknown")
+    }
+    if weeklyUsed != nil, effectiveWeeklyReset == nil {
+      notes.append("Set weekly reset in Settings")
+    }
+    return UsageSnapshot(
+      providerID: .claudeCode,
+      displayName: displayName,
+      pools: [UsagePoolSnapshot(id: "default", name: "Default", windows: windows)],
+      freshness: freshness,
+      sourceDescription: source,
+      cacheHitRate: cacheHitRate,
+      accountDescription: account,
+      notes: notes
+    )
+  }
+
+  private func isClaudePeakWindow(now: Date = Date()) -> Bool {
+    guard let pacific = TimeZone(identifier: "America/Los_Angeles") else { return false }
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = pacific
+    let weekday = calendar.component(.weekday, from: now)
+    let hour = calendar.component(.hour, from: now)
+    return (2...6).contains(weekday) && (5..<11).contains(hour)
+  }
+}
+
+private enum ClaudeAPIError: LocalizedError {
+  case unauthorized
+
+  var errorDescription: String? {
+    "Claude: OAuth session expired — run `claude auth login --claudeai`"
+  }
+}
+
+private struct ClaudeUsageResponse: Decodable {
+  let fiveHour: ClaudeUsageWindow?
+  let sevenDay: ClaudeUsageWindow?
+
+  enum CodingKeys: String, CodingKey {
+    case fiveHour = "five_hour"
+    case sevenDay = "seven_day"
+  }
+}
+
+private struct ClaudeUsageWindow: Decodable {
+  let utilization: Double?
+  let resetsAt: String?
+
+  enum CodingKeys: String, CodingKey {
+    case utilization
+    case resetsAt = "resets_at"
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/ClaudeCode/ClaudeCredentialStore.swift">
+import Foundation
+
+struct ClaudeCredentials: Sendable {
+  let accessToken: String
+  let source: String
+}
+
+@MainActor
+enum ClaudeCredentialStore {
+  private static let keychainService = "Claude Code-credentials"
+
+  static func load(allowKeychainPrompt: Bool = false) throws -> ClaudeCredentials {
+    let fileURL = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: ".claude/.credentials.json")
+    if let data = try? Data(contentsOf: fileURL),
+      let credentials = parse(data, source: "~/.claude/.credentials.json")
+    {
+      return credentials
+    }
+
+    if let data = try KeychainReader.genericPassword(
+      service: keychainService,
+      allowInteraction: allowKeychainPrompt
+    ),
+      let credentials = parse(data, source: "Claude Code Keychain")
+    {
+      return credentials
+    }
+
+    if !allowKeychainPrompt {
+      throw ProviderFailure.unavailable(
+        "Claude: OAuth Keychain access requires approval"
+      )
+    }
+    throw ProviderFailure.notLoggedIn(
+      "Claude: Pro/Max OAuth session unavailable — run `claude auth login --claudeai`"
+    )
+  }
+
+  static func authorizeKeychainAccess() throws {
+    KeychainReader.invalidate(service: keychainService)
+    _ = try load(allowKeychainPrompt: true)
+  }
+
+  private static func parse(_ data: Data, source: String) -> ClaudeCredentials? {
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      return nil
+    }
+    let oauth =
+      (root["claudeAiOauth"] as? [String: Any])
+      ?? (root["claude_ai_oauth"] as? [String: Any])
+      ?? root
+    guard let token = firstString(oauth, keys: ["accessToken", "access_token", "token"]),
+      !token.isEmpty
+    else {
+      return nil
+    }
+    return ClaudeCredentials(
+      accessToken: token,
+      source: source
+    )
+  }
+
+  private static func firstString(_ object: [String: Any], keys: [String]) -> String? {
+    for key in keys {
+      if let value = object[key] as? String {
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+      }
+    }
+    return nil
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/ClaudeCode/ClaudeProjectsWatcher.swift">
+import Darwin
+import Foundation
+
+final class ClaudeProjectsWatcher: @unchecked Sendable {
+  private let projectsURL: URL
+  private let queue = DispatchQueue(label: "dev.fenestra.claude-projects", qos: .utility)
+  private let onChange: @Sendable () -> Void
+  nonisolated(unsafe) private var source: DispatchSourceFileSystemObject?
+  nonisolated(unsafe) private var timer: DispatchSourceTimer?
+  nonisolated(unsafe) private var debounce: DispatchWorkItem?
+  nonisolated(unsafe) private var lastCallback = Date.distantPast
+  nonisolated(unsafe) private var lastModification = Date.distantPast
+  private let backstopInterval: TimeInterval?
+
+  nonisolated init(
+    projectsURL: URL,
+    backstopInterval: TimeInterval?,
+    onChange: @escaping @Sendable () -> Void
+  ) {
+    self.projectsURL = projectsURL
+    self.backstopInterval = backstopInterval
+    self.onChange = onChange
+  }
+
+  nonisolated func start() {
+    queue.async { [weak self] in
+      self?.startSource()
+      self?.startBackstop()
+    }
+  }
+
+  nonisolated func stop() {
+    queue.async { [weak self] in
+      self?.debounce?.cancel()
+      self?.debounce = nil
+      self?.source?.cancel()
+      self?.source = nil
+      self?.timer?.cancel()
+      self?.timer = nil
+    }
+  }
+
+  nonisolated private func startSource() {
+    guard source == nil else { return }
+    let descriptor = open(projectsURL.path, O_EVTONLY)
+    guard descriptor >= 0 else { return }
+    let source = DispatchSource.makeFileSystemObjectSource(
+      fileDescriptor: descriptor,
+      eventMask: [.write, .extend, .attrib, .rename, .delete],
+      queue: queue
+    )
+    source.setEventHandler { [weak self] in
+      self?.handleFileEvent()
+    }
+    source.setCancelHandler {
+      close(descriptor)
+    }
+    self.source = source
+    source.resume()
+  }
+
+  nonisolated private func startBackstop() {
+    timer?.cancel()
+    guard let backstopInterval, backstopInterval > 0 else {
+      timer = nil
+      return
+    }
+    let timer = DispatchSource.makeTimerSource(queue: queue)
+    timer.schedule(
+      deadline: .now() + backstopInterval,
+      repeating: backstopInterval,
+      leeway: .seconds(2)
+    )
+    timer.setEventHandler { [weak self] in
+      self?.checkBackstop()
+    }
+    self.timer = timer
+    lastModification = latestJSONLModification()
+    timer.resume()
+  }
+
+  nonisolated private func handleFileEvent() {
+    lastCallback = Date()
+    scheduleDebouncedRefresh()
+  }
+
+  nonisolated private func scheduleDebouncedRefresh() {
+    debounce?.cancel()
+    let item = DispatchWorkItem { [onChange] in onChange() }
+    debounce = item
+    queue.asyncAfter(deadline: .now() + 0.4, execute: item)
+  }
+
+  nonisolated private func checkBackstop() {
+    let modification = latestJSONLModification()
+    guard modification > lastModification else { return }
+    lastModification = modification
+    if Date().timeIntervalSince(lastCallback) > 120 {
+      source?.cancel()
+      source = nil
+      startSource()
+    }
+    scheduleDebouncedRefresh()
+  }
+
+  nonisolated private func latestJSONLModification() -> Date {
+    guard
+      let enumerator = FileManager.default.enumerator(
+        at: projectsURL,
+        includingPropertiesForKeys: [.contentModificationDateKey],
+        options: [.skipsHiddenFiles]
+      )
+    else {
+      return .distantPast
+    }
+    var latest = Date.distantPast
+    for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+      if let date = try? url.resourceValues(
+        forKeys: [.contentModificationDateKey]
+      ).contentModificationDate {
+        latest = max(latest, date)
+      }
+    }
+    return latest
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/ClaudeCode/ClaudeStatuslineReader.swift">
+import Foundation
+
+struct ClaudeStatuslineUsage: Sendable {
+  let fiveHourUsedPercent: Double?
+  let fiveHourReset: Date?
+  let weeklyUsedPercent: Double?
+  let weeklyReset: Date?
+  let freshness: Date
+}
+
+enum ClaudeStatuslineReader {
+  static var captureURL: URL {
+    HistoryStore.applicationSupportDirectory.appending(path: "claude-statusline.json")
+  }
+
+  static func read() -> ClaudeStatuslineUsage? {
+    guard let data = try? Data(contentsOf: captureURL),
+      let attributes = try? FileManager.default.attributesOfItem(atPath: captureURL.path),
+      let modified = attributes[.modificationDate] as? Date,
+      (-60..<10 * 60).contains(Date().timeIntervalSince(modified)),
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let limits = root["rate_limits"] as? [String: Any]
+    else {
+      return nil
+    }
+    let fiveHour = limits["five_hour"] as? [String: Any]
+    let sevenDay = limits["seven_day"] as? [String: Any]
+    let fiveHourUsed = usedPercent(fiveHour)
+    let weeklyUsed = usedPercent(sevenDay)
+    guard fiveHourUsed != nil || weeklyUsed != nil else { return nil }
+    return ClaudeStatuslineUsage(
+      fiveHourUsedPercent: fiveHourUsed,
+      fiveHourReset: ProviderDateParser.date(
+        from: fiveHour?["resets_at"] ?? fiveHour?["reset_at"]
+      ),
+      weeklyUsedPercent: weeklyUsed,
+      weeklyReset: ProviderDateParser.date(
+        from: sevenDay?["resets_at"] ?? sevenDay?["reset_at"]
+      ),
+      freshness: modified
+    )
+  }
+
+  private static func usedPercent(_ object: [String: Any]?) -> Double? {
+    guard let object else { return nil }
+    let value =
+      object["utilization"]
+      ?? object["used_percent"]
+      ?? object["usedPercent"]
+    guard let number = value as? NSNumber,
+      number.doubleValue.isFinite,
+      (0...100).contains(number.doubleValue)
+    else {
+      return nil
+    }
+    return number.doubleValue
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Codex/CodexCredentialStore.swift">
+import Foundation
+
+struct CodexCredentials: Sendable {
+  let accessToken: String
+  let accountID: String?
+}
+
+enum CodexCredentialStore {
+  static func load() throws -> CodexCredentials {
+    let url = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex/auth.json")
+    guard let data = try? Data(contentsOf: url),
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let tokens = root["tokens"] as? [String: Any],
+      let accessToken = tokens["access_token"] as? String,
+      !accessToken.isEmpty
+    else {
+      throw ProviderFailure.notLoggedIn("Codex: run `codex login`")
+    }
+    return CodexCredentials(
+      accessToken: accessToken,
+      accountID: tokens["account_id"] as? String
+    )
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Codex/CodexProvider.swift">
+import Foundation
+
+@MainActor
+final class CodexProvider: UsageProvider {
+  let id: ProviderID = .codex
+  let displayName = "Codex"
+
+  func currentSnapshot() async throws -> UsageSnapshot {
+    let credentials = try CodexCredentialStore.load()
+    do {
+      return try await fetch(credentials)
+    } catch CodexAPIError.unauthorized {
+      throw ProviderFailure.reauthenticationRequired(
+        "Codex: needs reauth — run `codex login`"
+      )
+    }
+  }
+
+  private func fetch(_ credentials: CodexCredentials) async throws -> UsageSnapshot {
+    guard let url = URL(string: "https://chatgpt.com/backend-api/wham/usage") else {
+      throw ProviderFailure.invalidResponse("Codex: invalid usage endpoint")
+    }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 30
+    request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("codex-cli/0.142.3", forHTTPHeaderField: "User-Agent")
+    if let accountID = credentials.accountID {
+      request.setValue(accountID, forHTTPHeaderField: "ChatGPT-Account-Id")
+    }
+
+    let (data, response) = try await RestrictedHTTPClient.data(for: request)
+    switch response.statusCode {
+    case 200:
+      break
+    case 401:
+      throw CodexAPIError.unauthorized
+    case 403:
+      throw ProviderFailure.reauthenticationRequired("Codex: account access denied")
+    default:
+      throw ProviderFailure.unavailable("Codex: usage API returned HTTP \(response.statusCode)")
+    }
+
+    let payload: CodexUsageResponse
+    do {
+      payload = try JSONDecoder().decode(CodexUsageResponse.self, from: data)
+    } catch {
+      throw ProviderFailure.invalidResponse("Codex: unexpected usage response")
+    }
+    guard let rateLimit = payload.rateLimit else {
+      throw ProviderFailure.invalidResponse("Codex: no rate-limit data")
+    }
+
+    let freshness = Date()
+    let windows = [
+      makeWindow(rateLimit.primaryWindow, position: "primary", freshness: freshness),
+      makeWindow(rateLimit.secondaryWindow, position: "secondary", freshness: freshness),
+    ].compactMap(\.self)
+    guard !windows.isEmpty else {
+      throw ProviderFailure.invalidResponse("Codex: no usage windows")
+    }
+
+    var notes: [String] = []
+    if let count = payload.rateLimitResetCredits?.availableCount, count > 0 {
+      notes.append("\(count) reset credit\(count == 1 ? "" : "s") banked")
+    }
+    if windows.contains(where: { $0.windowEnd == nil }) {
+      notes.append("Reset time unknown")
+    } else if windows.contains(where: { !$0.hasKnownTimeline }) {
+      notes.append("Window start unknown")
+    }
+    return UsageSnapshot(
+      providerID: .codex,
+      displayName: displayName,
+      pools: [UsagePoolSnapshot(id: "default", name: "Default", windows: windows)],
+      freshness: freshness,
+      sourceDescription: "Codex CLI usage API",
+      cacheHitRate: nil,
+      accountDescription: payload.planType,
+      notes: notes
+    )
+  }
+
+  private func makeWindow(
+    _ payload: CodexRateLimitWindow?,
+    position: String,
+    freshness: Date
+  ) -> UsageWindowSnapshot? {
+    guard let payload, payload.usedPercent.isFinite else { return nil }
+    let duration = payload.limitWindowSeconds
+      .flatMap { $0 > 0 ? TimeInterval($0) : nil }
+    let kind: UsageWindowKind
+    if let duration, duration <= 6 * 60 * 60 {
+      kind = .fiveHour
+    } else if let duration, duration >= 6 * 24 * 60 * 60 {
+      kind = .weekly
+    } else {
+      kind = .other
+    }
+    let end = ProviderDateParser.future(
+      ProviderDateParser.epochDate(payload.resetAt ?? 0),
+      after: freshness
+    )
+    let timeline = ProviderDateParser.window(endingAt: end, providerDuration: duration)
+    let used = payload.usedPercent
+    return UsageWindowSnapshot(
+      id: "codex-\(position)-\(Int(payload.limitWindowSeconds ?? 0))",
+      kind: kind,
+      label: kind == .other ? "Quota" : (kind == .fiveHour ? "5-hour" : "Weekly"),
+      windowStart: timeline.start,
+      windowEnd: timeline.end,
+      quotaTotal: 100,
+      used: used,
+      remainingPercent: 100 - used,
+      resetSource: end == nil ? nil : "Codex usage API",
+      breakdown: []
+    )
+  }
+}
+
+private enum CodexAPIError: Error {
+  case unauthorized
+}
+
+private struct CodexUsageResponse: Decodable {
+  let planType: String?
+  let rateLimit: CodexRateLimitDetails?
+  let rateLimitResetCredits: CodexResetCredits?
+
+  enum CodingKeys: String, CodingKey {
+    case planType = "plan_type"
+    case rateLimit = "rate_limit"
+    case rateLimitResetCredits = "rate_limit_reset_credits"
+  }
+}
+
+private struct CodexRateLimitDetails: Decodable {
+  let primaryWindow: CodexRateLimitWindow?
+  let secondaryWindow: CodexRateLimitWindow?
+
+  enum CodingKeys: String, CodingKey {
+    case primaryWindow = "primary_window"
+    case secondaryWindow = "secondary_window"
+  }
+}
+
+private struct CodexRateLimitWindow: Decodable {
+  let usedPercent: Double
+  let limitWindowSeconds: Int?
+  let resetAt: Double?
+
+  enum CodingKeys: String, CodingKey {
+    case usedPercent = "used_percent"
+    case limitWindowSeconds = "limit_window_seconds"
+    case resetAt = "reset_at"
+  }
+}
+
+private struct CodexResetCredits: Decodable {
+  let availableCount: Int
+
+  enum CodingKeys: String, CodingKey {
+    case availableCount = "available_count"
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Cursor/CursorAppAuthStore.swift">
+import Foundation
+import SQLite3
+
+enum CursorAppAuthStore {
+  static func load() -> CursorAuthSession? {
+    let database = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: "Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+    guard FileManager.default.fileExists(atPath: database.path),
+      let token = sqliteValue(database: database, key: "cursorAuth/accessToken"),
+      let payload = jwtPayload(token),
+      let subject = payload["sub"] as? String,
+      let userID = subject.split(separator: "|").last.map(String.init),
+      let expiry = ProviderDateParser.date(from: payload["exp"]),
+      expiry.timeIntervalSinceNow > 60
+    else {
+      return nil
+    }
+    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+    guard userID.unicodeScalars.allSatisfy(allowed.contains) else { return nil }
+    return CursorAuthSession(
+      cookieHeader: "WorkosCursorSessionToken=\(userID)%3A%3A\(token)",
+      source: "Cursor app session",
+      userID: userID
+    )
+  }
+
+  private static func sqliteValue(database: URL, key: String) -> String? {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(database.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+      sqlite3_close(db)
+      return nil
+    }
+    defer { sqlite3_close(db) }
+    sqlite3_busy_timeout(db, 250)
+
+    var statement: OpaquePointer?
+    guard
+      sqlite3_prepare_v2(
+        db,
+        "SELECT value FROM ItemTable WHERE key = ? LIMIT 1;",
+        -1,
+        &statement,
+        nil
+      ) == SQLITE_OK
+    else {
+      return nil
+    }
+    defer { sqlite3_finalize(statement) }
+    sqlite3_bind_text(statement, 1, key, -1, sqliteTransient)
+    guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+    if sqlite3_column_type(statement, 0) == SQLITE_TEXT,
+      let value = sqlite3_column_text(statement, 0)
+    {
+      return String(cString: value)
+    }
+    guard sqlite3_column_type(statement, 0) == SQLITE_BLOB,
+      let bytes = sqlite3_column_blob(statement, 0)
+    else {
+      return nil
+    }
+    let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+    return String(data: data, encoding: .utf8)
+      ?? String(data: data, encoding: .utf16LittleEndian)
+  }
+
+  private static func jwtPayload(_ token: String) -> [String: Any]? {
+    let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count > 1 else { return nil }
+    var value = String(parts[1])
+      .replacingOccurrences(of: "-", with: "+")
+      .replacingOccurrences(of: "_", with: "/")
+    value += String(repeating: "=", count: (4 - value.count % 4) % 4)
+    guard let data = Data(base64Encoded: value) else { return nil }
+    return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+  }
+}
+
+private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Cursor/CursorBrowserCookieStore.swift">
+import CommonCrypto
+import CryptoKit
+import Foundation
+import SQLite3
+
+@MainActor
+enum CursorBrowserCookieStore {
+  private(set) static var keychainApprovalRequired = false
+
+  private static let sessionNames: Set<String> = [
+    "WorkosCursorSessionToken",
+    "__Secure-next-auth.session-token",
+    "next-auth.session-token",
+    "wos-session",
+    "__Secure-wos-session",
+    "authjs.session-token",
+    "__Secure-authjs.session-token",
+  ]
+
+  static func load(
+    allowKeychainAccess: Bool,
+    allowInteraction: Bool = false
+  ) -> CursorAuthSession? {
+    keychainApprovalRequired = false
+    if let firefox = loadFirefox() {
+      return firefox
+    }
+    if let safari = loadSafari() {
+      return safari
+    }
+    guard allowKeychainAccess else { return nil }
+    if let chrome = loadChromium(
+      applicationSupportName: "Google/Chrome",
+      keychainService: "Chrome Safe Storage",
+      source: "Chrome cookies",
+      allowInteraction: allowInteraction
+    ) {
+      return chrome
+    }
+    return loadChromium(
+      applicationSupportName: "Microsoft Edge",
+      keychainService: "Microsoft Edge Safe Storage",
+      source: "Edge cookies",
+      allowInteraction: allowInteraction
+    )
+  }
+
+  static func resetKeychainCache() {
+    KeychainReader.invalidate(service: "Chrome Safe Storage")
+    KeychainReader.invalidate(service: "Microsoft Edge Safe Storage")
+  }
+
+  static var keychainBrowserDetected: Bool {
+    let support = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: "Library/Application Support")
+    return FileManager.default.fileExists(atPath: support.appending(path: "Google/Chrome").path)
+      || FileManager.default.fileExists(
+        atPath: support.appending(path: "Microsoft Edge").path
+      )
+  }
+
+  private static func loadFirefox() -> CursorAuthSession? {
+    let profiles = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: "Library/Application Support/Firefox/Profiles")
+    guard
+      let children = try? FileManager.default.contentsOfDirectory(
+        at: profiles,
+        includingPropertiesForKeys: nil
+      )
+    else {
+      return nil
+    }
+    for profile in children {
+      let database = profile.appending(path: "cookies.sqlite")
+      if let cookies = queryFirefoxCookies(database: database),
+        let session = makeSession(cookies: cookies, source: "Firefox cookies")
+      {
+        return session
+      }
+    }
+    return nil
+  }
+
+  private static func loadChromium(
+    applicationSupportName: String,
+    keychainService: String,
+    source: String,
+    allowInteraction: Bool
+  ) -> CursorAuthSession? {
+    let root = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: "Library/Application Support")
+      .appending(path: applicationSupportName)
+    guard FileManager.default.fileExists(atPath: root.path) else { return nil }
+    let passwordData: Data
+    do {
+      guard
+        let value = try KeychainReader.genericPassword(
+          service: keychainService,
+          allowInteraction: allowInteraction
+        )
+      else {
+        keychainApprovalRequired = !allowInteraction
+        return nil
+      }
+      passwordData = value
+    } catch {
+      keychainApprovalRequired = true
+      return nil
+    }
+    guard
+      let password = String(data: passwordData, encoding: .utf8),
+      let key = chromiumKey(password: password),
+      let profiles = try? FileManager.default.contentsOfDirectory(
+        at: root,
+        includingPropertiesForKeys: [.isDirectoryKey]
+      )
+    else {
+      return nil
+    }
+    let ordered = profiles.sorted {
+      ($0.lastPathComponent == "Default" ? 0 : 1)
+        < ($1.lastPathComponent == "Default" ? 0 : 1)
+    }
+    for profile in ordered {
+      let candidates = [
+        profile.appending(path: "Network/Cookies"),
+        profile.appending(path: "Cookies"),
+      ]
+      for database in candidates {
+        if let cookies = queryChromiumCookies(database: database, decryptionKey: key),
+          let session = makeSession(cookies: cookies, source: source)
+        {
+          return session
+        }
+      }
+    }
+    return nil
+  }
+
+  private static func queryChromiumCookies(
+    database: URL,
+    decryptionKey: Data
+  ) -> [(name: String, value: String)]? {
+    withPrivateDatabaseCopy(of: database) { copy in
+      var db: OpaquePointer?
+      guard sqlite3_open_v2(copy.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        sqlite3_close(db)
+        return nil
+      }
+      defer { sqlite3_close(db) }
+      let sql = """
+        SELECT name, value, encrypted_value, host_key
+        FROM cookies
+        WHERE host_key LIKE '%cursor.com' OR host_key LIKE '%cursor.sh';
+        """
+      var statement: OpaquePointer?
+      guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        return nil
+      }
+      defer { sqlite3_finalize(statement) }
+
+      var cookies: [(String, String)] = []
+      while sqlite3_step(statement) == SQLITE_ROW {
+        guard let nameValue = sqlite3_column_text(statement, 0) else { continue }
+        let name = String(cString: nameValue)
+        let host = sqlite3_column_text(statement, 3).map(String.init(cString:)) ?? ""
+        guard sessionNames.contains(name), isCursorDomain(host) else { continue }
+
+        var value = sqlite3_column_text(statement, 1).map(String.init(cString:)) ?? ""
+        if value.isEmpty, let bytes = sqlite3_column_blob(statement, 2) {
+          let encrypted = Data(
+            bytes: bytes,
+            count: Int(sqlite3_column_bytes(statement, 2))
+          )
+          value = decryptChromiumCookie(encrypted, key: decryptionKey, host: host) ?? ""
+        }
+        guard !value.isEmpty else { continue }
+        cookies.append((name, value))
+      }
+      return cookies.isEmpty ? nil : cookies
+    }
+  }
+
+  static func queryFirefoxCookies(
+    database: URL
+  ) -> [(name: String, value: String)]? {
+    withPrivateDatabaseCopy(of: database) { copy in
+      var db: OpaquePointer?
+      guard sqlite3_open_v2(copy.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+        sqlite3_close(db)
+        return nil
+      }
+      defer { sqlite3_close(db) }
+      let sql = """
+        SELECT name, value, host
+        FROM moz_cookies
+        WHERE host LIKE '%cursor.com' OR host LIKE '%cursor.sh';
+        """
+      var statement: OpaquePointer?
+      guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+        return nil
+      }
+      defer { sqlite3_finalize(statement) }
+
+      var cookies: [(String, String)] = []
+      while sqlite3_step(statement) == SQLITE_ROW {
+        guard let nameValue = sqlite3_column_text(statement, 0),
+          let valueValue = sqlite3_column_text(statement, 1)
+        else {
+          continue
+        }
+        let name = String(cString: nameValue)
+        let value = String(cString: valueValue)
+        let host = sqlite3_column_text(statement, 2).map(String.init(cString:)) ?? ""
+        guard sessionNames.contains(name), isCursorDomain(host), !value.isEmpty else {
+          continue
+        }
+        cookies.append((name, value))
+      }
+      return cookies.isEmpty ? nil : cookies
+    }
+  }
+
+  private static func withPrivateDatabaseCopy<T>(
+    of database: URL,
+    _ body: (URL) -> T?
+  ) -> T? {
+    guard FileManager.default.fileExists(atPath: database.path) else { return nil }
+    let directory = FileManager.default.temporaryDirectory
+      .appending(path: "fenestra-cookies-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let copy = directory.appending(path: database.lastPathComponent)
+    do {
+      try FileManager.default.createDirectory(
+        at: directory,
+        withIntermediateDirectories: false,
+        attributes: [.posixPermissions: 0o700]
+      )
+      try FileManager.default.copyItem(at: database, to: copy)
+      for suffix in ["-wal", "-shm"] {
+        let sidecar = URL(filePath: database.path + suffix)
+        guard FileManager.default.fileExists(atPath: sidecar.path) else { continue }
+        try FileManager.default.copyItem(
+          at: sidecar,
+          to: URL(filePath: copy.path + suffix)
+        )
+      }
+    } catch {
+      try? FileManager.default.removeItem(at: directory)
+      return nil
+    }
+    defer { try? FileManager.default.removeItem(at: directory) }
+    return body(copy)
+  }
+
+  private static func loadSafari() -> CursorAuthSession? {
+    let url = FileManager.default.homeDirectoryForCurrentUser
+      .appending(path: "Library/Cookies/Cookies.binarycookies")
+    guard let data = try? Data(contentsOf: url),
+      data.count >= 8,
+      String(data: data.prefix(4), encoding: .ascii) == "cook"
+    else {
+      return nil
+    }
+    let pageCount = Int(bigEndianUInt32(data, at: 4) ?? 0)
+    guard pageCount > 0, data.count >= 8 + pageCount * 4 else { return nil }
+    var pageOffset = 8 + pageCount * 4
+    var cookies: [(String, String)] = []
+    for index in 0..<pageCount {
+      let size = Int(bigEndianUInt32(data, at: 8 + index * 4) ?? 0)
+      guard size > 0, pageOffset + size <= data.count else { break }
+      let page = data.subdata(in: pageOffset..<(pageOffset + size))
+      cookies.append(contentsOf: parseSafariPage(page))
+      pageOffset += size
+    }
+    guard !cookies.isEmpty else { return nil }
+    let known = cookies.filter { sessionNames.contains($0.0) }
+    return makeSession(
+      cookies: known.isEmpty ? cookies : known,
+      source: "Safari cookies"
+    )
+  }
+
+  private static func parseSafariPage(_ page: Data) -> [(String, String)] {
+    guard page.count >= 8 else { return [] }
+    let count = Int(littleEndianUInt32(page, at: 4) ?? 0)
+    guard count > 0, page.count >= 8 + count * 4 else { return [] }
+    var result: [(String, String)] = []
+    for index in 0..<count {
+      let offset = Int(littleEndianUInt32(page, at: 8 + index * 4) ?? 0)
+      guard offset >= 0, offset + 40 <= page.count else { continue }
+      let size = Int(littleEndianUInt32(page, at: offset) ?? 0)
+      guard size >= 40, offset + size <= page.count else { continue }
+      let urlOffset = Int(littleEndianUInt32(page, at: offset + 16) ?? 0)
+      let nameOffset = Int(littleEndianUInt32(page, at: offset + 20) ?? 0)
+      let valueOffset = Int(littleEndianUInt32(page, at: offset + 28) ?? 0)
+      guard let domain = nullTerminatedString(page, at: offset + urlOffset),
+        isCursorDomain(domain),
+        let name = nullTerminatedString(page, at: offset + nameOffset),
+        let value = nullTerminatedString(page, at: offset + valueOffset),
+        sessionNames.contains(name),
+        !name.isEmpty,
+        !value.isEmpty
+      else {
+        continue
+      }
+      result.append((name, value))
+    }
+    return result
+  }
+
+  private static func chromiumKey(password: String) -> Data? {
+    let passwordBytes = Array(password.utf8)
+    let salt = Array("saltysalt".utf8)
+    var key = [UInt8](repeating: 0, count: kCCKeySizeAES128)
+    let result = CCKeyDerivationPBKDF(
+      CCPBKDFAlgorithm(kCCPBKDF2),
+      passwordBytes,
+      passwordBytes.count,
+      salt,
+      salt.count,
+      CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1),
+      1003,
+      &key,
+      key.count
+    )
+    return result == kCCSuccess ? Data(key) : nil
+  }
+
+  private static func decryptChromiumCookie(
+    _ encrypted: Data,
+    key: Data,
+    host: String
+  ) -> String? {
+    guard encrypted.count > 3 else { return nil }
+    let prefix = String(data: encrypted.prefix(3), encoding: .ascii)
+    guard prefix == "v10" || prefix == "v11" else {
+      return String(data: encrypted, encoding: .utf8)
+    }
+    let ciphertext = encrypted.dropFirst(3)
+    var output = [UInt8](repeating: 0, count: ciphertext.count + kCCBlockSizeAES128)
+    var moved = 0
+    let status = key.withUnsafeBytes { keyBytes in
+      ciphertext.withUnsafeBytes { encryptedBytes in
+        CCCrypt(
+          CCOperation(kCCDecrypt),
+          CCAlgorithm(kCCAlgorithmAES),
+          CCOptions(kCCOptionPKCS7Padding),
+          keyBytes.baseAddress,
+          key.count,
+          Array(repeating: UInt8(0x20), count: kCCBlockSizeAES128),
+          encryptedBytes.baseAddress,
+          ciphertext.count,
+          &output,
+          output.count,
+          &moved
+        )
+      }
+    }
+    guard status == kCCSuccess else { return nil }
+    var plaintext = Data(output.prefix(moved))
+    let expectedHostDigest = Data(SHA256.hash(data: Data(host.utf8)))
+    if plaintext.count > expectedHostDigest.count,
+      Data(plaintext.prefix(expectedHostDigest.count)) == expectedHostDigest
+    {
+      // Chrome 24+ authenticates the cookie's host before the encrypted value.
+      plaintext.removeFirst(32)
+    }
+    return String(data: plaintext, encoding: .utf8)
+  }
+
+  private static func makeSession(
+    cookies: [(String, String)],
+    source: String
+  ) -> CursorAuthSession? {
+    var seenNames: Set<String> = []
+    let header = cookies.compactMap { name, value -> String? in
+      let forbiddenNameCharacters = CharacterSet(charactersIn: "=;\r\n\0")
+      let forbiddenValueCharacters = CharacterSet(charactersIn: ";\r\n\0")
+      guard !name.isEmpty,
+        seenNames.insert(name).inserted,
+        name.rangeOfCharacter(from: forbiddenNameCharacters) == nil,
+        value.rangeOfCharacter(from: forbiddenValueCharacters) == nil
+      else {
+        return nil
+      }
+      return "\(name)=\(value)"
+    }.joined(separator: "; ")
+    guard !header.isEmpty else { return nil }
+    return CursorAuthSession(cookieHeader: header, source: source, userID: nil)
+  }
+
+  nonisolated static func isCursorDomain(_ domain: String) -> Bool {
+    let normalized =
+      domain
+      .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+      .lowercased()
+    return normalized == "cursor.com"
+      || normalized.hasSuffix(".cursor.com")
+      || normalized == "cursor.sh"
+      || normalized.hasSuffix(".cursor.sh")
+  }
+
+  private static func bigEndianUInt32(_ data: Data, at offset: Int) -> UInt32? {
+    guard offset >= 0, offset + 4 <= data.count else { return nil }
+    return data[offset..<(offset + 4)].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+  }
+
+  private static func littleEndianUInt32(_ data: Data, at offset: Int) -> UInt32? {
+    guard offset >= 0, offset + 4 <= data.count else { return nil }
+    return data[offset..<(offset + 4)].enumerated().reduce(UInt32(0)) {
+      $0 | (UInt32($1.element) << UInt32($1.offset * 8))
+    }
+  }
+
+  private static func nullTerminatedString(_ data: Data, at offset: Int) -> String? {
+    guard offset >= 0, offset < data.count else { return nil }
+    let tail = data[offset...]
+    let end = tail.firstIndex(of: 0) ?? data.endIndex
+    return String(data: data[offset..<end], encoding: .utf8)
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Cursor/CursorModels.swift">
+import Foundation
+
+struct CursorUsageSummary: Decodable {
+  let billingCycleStart: String?
+  let billingCycleEnd: String?
+  let membershipType: String?
+  let individualUsage: CursorIndividualUsage?
+}
+
+struct CursorIndividualUsage: Decodable {
+  let plan: CursorPlanUsage?
+  let overall: CursorOverallUsage?
+}
+
+struct CursorPlanUsage: Decodable {
+  let used: Double?
+  let limit: Double?
+  let totalPercentUsed: Double?
+}
+
+struct CursorOverallUsage: Decodable {
+  let used: Double?
+  let limit: Double?
+}
+
+struct CursorUserInfo: Decodable {
+  let email: String?
+  let sub: String?
+}
+
+struct CursorLegacyUsage: Decodable {
+  let gpt4: CursorLegacyModelUsage?
+
+  enum CodingKeys: String, CodingKey {
+    case gpt4 = "gpt-4"
+  }
+}
+
+struct CursorLegacyModelUsage: Decodable {
+  let numRequests: Int?
+  let numRequestsTotal: Int?
+  let maxRequestUsage: Int?
+}
+
+struct CursorAuthSession: Sendable {
+  let cookieHeader: String
+  let source: String
+  let userID: String?
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Cursor/CursorProvider.swift">
+import Foundation
+
+@MainActor
+final class CursorProvider: UsageProvider {
+  let id: ProviderID = .cursor
+  let displayName = "Cursor"
+  var allowBrowserKeychainAccess = false
+
+  private var cachedSession: CursorAuthSession?
+
+  func currentSnapshot() async throws -> UsageSnapshot {
+    var localCandidates: [CursorAuthSession] = []
+    if let cachedSession {
+      localCandidates.append(cachedSession)
+    }
+    if let app = CursorAppAuthStore.load(),
+      !localCandidates.contains(where: { $0.cookieHeader == app.cookieHeader })
+    {
+      localCandidates.append(app)
+    }
+
+    let localResult = await firstSnapshot(from: localCandidates)
+    if let snapshot = localResult.snapshot {
+      return snapshot
+    }
+
+    var browserResult: SnapshotAttempt?
+    if let browser = CursorBrowserCookieStore.load(
+      allowKeychainAccess: allowBrowserKeychainAccess
+    ),
+      !localCandidates.contains(where: { $0.cookieHeader == browser.cookieHeader })
+    {
+      browserResult = await firstSnapshot(from: [browser])
+      if let snapshot = browserResult?.snapshot {
+        return snapshot
+      }
+    }
+
+    guard !localCandidates.isEmpty || browserResult != nil else {
+      if CursorBrowserCookieStore.keychainBrowserDetected {
+        if allowBrowserKeychainAccess,
+          CursorBrowserCookieStore.keychainApprovalRequired
+        {
+          throw ProviderFailure.notLoggedIn(
+            "Cursor: browser Keychain access requires approval"
+          )
+        }
+        if allowBrowserKeychainAccess {
+          throw ProviderFailure.notLoggedIn(
+            "Cursor: sign in to cursor.com in your browser"
+          )
+        }
+        throw ProviderFailure.notLoggedIn(
+          "Cursor: enable browser access in Settings or sign in to Cursor.app"
+        )
+      }
+      throw ProviderFailure.notLoggedIn("Cursor: sign in to cursor.com in your browser")
+    }
+
+    throw browserResult?.lastError
+      ?? localResult.lastError
+      ?? ProviderFailure.unavailable("Cursor: usage unavailable")
+  }
+
+  func authorizeBrowserKeychainAccess() throws {
+    guard allowBrowserKeychainAccess else {
+      throw ProviderFailure.unavailable("Cursor: enable browser access in Settings first")
+    }
+    CursorBrowserCookieStore.resetKeychainCache()
+    guard
+      let session = CursorBrowserCookieStore.load(
+        allowKeychainAccess: true,
+        allowInteraction: true
+      )
+    else {
+      throw ProviderFailure.notLoggedIn(
+        "Cursor: no signed-in cursor.com browser session found"
+      )
+    }
+    cachedSession = session
+  }
+
+  private func firstSnapshot(from candidates: [CursorAuthSession]) async -> SnapshotAttempt {
+    var lastError: Error?
+    for session in candidates {
+      do {
+        let snapshot = try await fetch(session)
+        cachedSession = session
+        return SnapshotAttempt(snapshot: snapshot, lastError: nil)
+      } catch CursorAPIError.unauthorized {
+        if cachedSession?.cookieHeader == session.cookieHeader {
+          cachedSession = nil
+        }
+        lastError = ProviderFailure.notLoggedIn(
+          "Cursor: sign in to cursor.com in your browser"
+        )
+      } catch {
+        lastError = error
+      }
+    }
+    return SnapshotAttempt(snapshot: nil, lastError: lastError)
+  }
+
+  private func fetch(_ session: CursorAuthSession) async throws -> UsageSnapshot {
+    async let summaryResult = request(path: "/api/usage-summary", session: session)
+    async let userResult = try? request(path: "/api/auth/me", session: session)
+    let (summaryData, _) = try await summaryResult
+    let userData = await userResult?.0
+
+    let summary: CursorUsageSummary
+    do {
+      summary = try JSONDecoder().decode(CursorUsageSummary.self, from: summaryData)
+    } catch {
+      throw ProviderFailure.invalidResponse("Cursor: unexpected usage response")
+    }
+    let user = userData.flatMap { try? JSONDecoder().decode(CursorUserInfo.self, from: $0) }
+    let userID = user?.sub ?? session.userID
+    var legacy: CursorLegacyUsage?
+    if let userID {
+      if let data = try? await request(
+        path: "/api/usage",
+        queryItems: [URLQueryItem(name: "user", value: userID)],
+        session: session
+      ).0 {
+        legacy = try? JSONDecoder().decode(CursorLegacyUsage.self, from: data)
+      }
+    }
+
+    let freshness = Date()
+    let billing = ProviderDateParser.activeWindow(
+      start: ProviderDateParser.date(from: summary.billingCycleStart),
+      end: ProviderDateParser.date(from: summary.billingCycleEnd),
+      at: freshness
+    )
+    let breakdown = dynamicBreakdown(from: summaryData)
+    let meter = try CursorUsageResolver.resolve(
+      summary: summary,
+      legacy: legacy,
+      breakdown: breakdown
+    )
+
+    let window = UsageWindowSnapshot(
+      id: "cursor-monthly-v2",
+      kind: .monthly,
+      label: "Monthly",
+      windowStart: billing.start,
+      windowEnd: billing.end,
+      quotaTotal: meter.quotaTotal,
+      used: meter.used,
+      remainingPercent: max(0, 100 - meter.totalPercent),
+      resetSource: billing.end == nil ? nil : "Cursor billing data",
+      breakdown: breakdown.filter {
+        $0.id.caseInsensitiveCompare("total") != .orderedSame
+      }
+    )
+    var notes = [meter.unitNote]
+    if !window.hasKnownTimeline {
+      notes.append("Billing reset unknown")
+    }
+    return UsageSnapshot(
+      providerID: .cursor,
+      displayName: displayName,
+      pools: [UsagePoolSnapshot(id: "included", name: "Included", windows: [window])],
+      freshness: freshness,
+      sourceDescription: session.source,
+      cacheHitRate: nil,
+      accountDescription: [user?.email, summary.membershipType].compactMap(\.self)
+        .joined(separator: " · "),
+      notes: notes
+    )
+  }
+
+  private func request(
+    path: String,
+    queryItems: [URLQueryItem] = [],
+    session: CursorAuthSession
+  ) async throws -> (Data, HTTPURLResponse) {
+    guard path.hasPrefix("/"), !path.contains("..") else {
+      throw ProviderFailure.invalidResponse("Cursor: invalid endpoint path")
+    }
+    var components = URLComponents()
+    components.scheme = "https"
+    components.host = "cursor.com"
+    components.path = path
+    components.queryItems = queryItems.isEmpty ? nil : queryItems
+    guard let url = components.url else {
+      throw ProviderFailure.invalidResponse("Cursor: invalid endpoint")
+    }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 15
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(session.cookieHeader, forHTTPHeaderField: "Cookie")
+    let result = try await RestrictedHTTPClient.data(for: request)
+    switch result.1.statusCode {
+    case 200:
+      return result
+    case 401, 403:
+      throw CursorAPIError.unauthorized
+    default:
+      throw ProviderFailure.unavailable(
+        "Cursor: dashboard returned HTTP \(result.1.statusCode)"
+      )
+    }
+  }
+
+  private func dynamicBreakdown(from data: Data) -> [UsageBreakdownItem] {
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let individual = root["individualUsage"] as? [String: Any],
+      let plan = individual["plan"] as? [String: Any]
+    else {
+      return []
+    }
+    return plan.compactMap { key, value -> UsageBreakdownItem? in
+      guard key.hasSuffix("PercentUsed"),
+        let number = value as? NSNumber,
+        number.doubleValue.isFinite,
+        number.doubleValue >= 0
+      else {
+        return nil
+      }
+      let raw = String(key.dropLast("PercentUsed".count))
+      guard !raw.isEmpty else { return nil }
+      let label = raw == "total" ? "Total" : humanize(raw)
+      return UsageBreakdownItem(
+        id: raw,
+        label: label,
+        usedPercent: number.doubleValue
+      )
+    }.sorted { $0.label < $1.label }
+  }
+
+  private func humanize(_ value: String) -> String {
+    if value.lowercased() == "api" {
+      return "API"
+    }
+    let spaced = value.reduce(into: "") { result, character in
+      if character.isUppercase, !result.isEmpty {
+        result.append(" ")
+      }
+      result.append(character)
+    }
+    return spaced.prefix(1).uppercased() + spaced.dropFirst()
+  }
+}
+
+private enum CursorAPIError: Error {
+  case unauthorized
+}
+
+private struct SnapshotAttempt {
+  let snapshot: UsageSnapshot?
+  let lastError: Error?
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/Cursor/CursorUsageResolver.swift">
+import Foundation
+
+struct CursorResolvedUsage: Equatable {
+  let quotaTotal: Double
+  let used: Double
+  let totalPercent: Double
+  let unitNote: String
+}
+
+enum CursorUsageResolver {
+  static func resolve(
+    summary: CursorUsageSummary,
+    legacy: CursorLegacyUsage?,
+    breakdown: [UsageBreakdownItem]
+  ) throws -> CursorResolvedUsage {
+    if let requestLimit = legacy?.gpt4?.maxRequestUsage, requestLimit > 0 {
+      let used = Double(legacy?.gpt4?.numRequestsTotal ?? legacy?.gpt4?.numRequests ?? 0)
+      guard used >= 0 else {
+        throw ProviderFailure.invalidResponse("Cursor: invalid request usage")
+      }
+      return CursorResolvedUsage(
+        quotaTotal: Double(requestLimit),
+        used: used,
+        totalPercent: used / Double(requestLimit) * 100,
+        unitNote: "\(Int(used))/\(requestLimit) requests"
+      )
+    }
+
+    let plan = summary.individualUsage?.plan
+    let overall = summary.individualUsage?.overall
+    let limitCents = plan?.limit ?? overall?.limit ?? 0
+    let rawUsedCents = plan?.used ?? overall?.used
+    guard limitCents.isFinite, limitCents >= 0 else {
+      throw ProviderFailure.invalidResponse("Cursor: invalid included usage")
+    }
+    if let rawUsedCents, !rawUsedCents.isFinite || rawUsedCents < 0 {
+      throw ProviderFailure.invalidResponse("Cursor: invalid included usage")
+    }
+
+    // Cursor can return plan.used == plan.limit while totalPercentUsed and the
+    // component percentages are much lower. Treat its explicit percentage as
+    // authoritative and derive the displayed dollar consumption from it.
+    let reportedPercent =
+      plan?.totalPercentUsed
+      ?? breakdown.first(where: {
+        $0.id.caseInsensitiveCompare("total") == .orderedSame
+      })?.usedPercent
+    let quotaTotal = limitCents / 100
+    let used: Double
+    let totalPercent: Double
+
+    if let reportedPercent {
+      guard reportedPercent.isFinite, reportedPercent >= 0 else {
+        throw ProviderFailure.invalidResponse("Cursor: invalid included-usage percentage")
+      }
+      totalPercent = reportedPercent
+      used = quotaTotal > 0 ? quotaTotal * reportedPercent / 100 : reportedPercent
+    } else if quotaTotal > 0, let rawUsedCents {
+      used = rawUsedCents / 100
+      totalPercent = used / quotaTotal * 100
+    } else {
+      throw ProviderFailure.invalidResponse("Cursor: no included-usage total")
+    }
+
+    let normalizedQuota = quotaTotal > 0 ? quotaTotal : 100
+    let unitNote =
+      quotaTotal > 0
+      ? "\(used.formatted(.currency(code: "USD"))) / \(quotaTotal.formatted(.currency(code: "USD")))"
+      : "Included usage"
+    return CursorResolvedUsage(
+      quotaTotal: normalizedQuota,
+      used: used,
+      totalPercent: totalPercent,
+      unitNote: unitNote
+    )
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/Providers/UsageProvider.swift">
+import Foundation
+
+@MainActor
+protocol UsageProvider: AnyObject {
+  var id: ProviderID { get }
+  var displayName: String { get }
+  func currentSnapshot() async throws -> UsageSnapshot
+}
+
+enum ProviderFailure: LocalizedError, Equatable {
+  case notLoggedIn(String)
+  case reauthenticationRequired(String)
+  case unavailable(String)
+  case invalidResponse(String)
+
+  var errorDescription: String? {
+    switch self {
+    case .notLoggedIn(let message),
+      .reauthenticationRequired(let message),
+      .unavailable(let message),
+      .invalidResponse(let message):
+      message
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/UI/Charts/WindowPanel.swift">
+import Charts
+import SwiftUI
+
+private struct WindowChartSample: Identifiable {
+  let id: String
+  let date: Date
+  let remaining: Double
+  let ideal: Double
+
+  var isOverPace: Bool { remaining < ideal }
+}
+
+struct WindowPanel: View {
+  let providerID: ProviderID
+  let pool: UsagePoolSnapshot
+  let window: UsageWindowSnapshot
+  let freshness: Date
+  let history: [HistoryPoint]
+  let evaluation: PaceEvaluation?
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      WindowPanelHeader(window: window, evaluation: evaluation)
+      if let windowStart = window.windowStart,
+        let windowEnd = window.windowEnd,
+        windowEnd > windowStart
+      {
+        WindowPaceChart(
+          window: window,
+          windowStart: windowStart,
+          windowEnd: windowEnd,
+          freshness: freshness,
+          history: history,
+          evaluation: evaluation
+        )
+        .frame(minHeight: 155)
+      } else {
+        UnknownTimelineView(window: window)
+      }
+      if window.remainingPercent <= 0 {
+        ExhaustionBanner(date: nil)
+      } else if let exhaustion = evaluation?.projectedExhaustion,
+        let reset = window.windowEnd,
+        exhaustion < reset
+      {
+        ExhaustionBanner(date: exhaustion)
+      }
+      if !window.breakdown.isEmpty {
+        UsageBreakdown(items: window.breakdown)
+      }
+    }
+    .padding(12)
+    .background {
+      RoundedRectangle(cornerRadius: 12)
+        .fill(.quaternary.opacity(0.45))
+    }
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("\(providerID.displayName), \(pool.name), \(window.label)")
+  }
+}
+
+private struct WindowPanelHeader: View {
+  let window: UsageWindowSnapshot
+  let evaluation: PaceEvaluation?
+
+  var body: some View {
+    HStack(alignment: .firstTextBaseline) {
+      Text(window.label)
+        .font(.headline)
+      Spacer()
+      if let evaluation {
+        Text(evaluation.label)
+          .font(.callout.weight(.semibold))
+          .foregroundStyle(evaluation.isOverPace ? .red : .green)
+      } else {
+        Text("\(window.remainingPercent.formatted(.number.precision(.fractionLength(0))))% left")
+          .font(.callout.weight(.semibold))
+      }
+    }
+  }
+}
+
+private struct WindowPaceChart: View {
+  let window: UsageWindowSnapshot
+  let windowStart: Date
+  let windowEnd: Date
+  let freshness: Date
+  let history: [HistoryPoint]
+  let evaluation: PaceEvaluation?
+
+  private var samples: [WindowChartSample] {
+    var values = history.compactMap { point -> WindowChartSample? in
+      guard
+        let ideal = PaceCalculator.idealRemaining(
+          at: point.timestamp,
+          windowStart: windowStart,
+          windowEnd: windowEnd
+        )
+      else {
+        return nil
+      }
+      return WindowChartSample(
+        id: point.id.uuidString,
+        date: point.timestamp,
+        remaining: point.remainingPercent,
+        ideal: ideal
+      )
+    }
+    if values.last?.date != freshness,
+      let ideal = PaceCalculator.idealRemaining(
+        at: freshness,
+        windowStart: windowStart,
+        windowEnd: windowEnd
+      )
+    {
+      values.append(
+        WindowChartSample(
+          id: "current-\(window.id)",
+          date: freshness,
+          remaining: window.remainingPercent,
+          ideal: ideal
+        ))
+    }
+    return values
+  }
+
+  var body: some View {
+    VStack(spacing: 3) {
+      Chart {
+        idealMarks()
+        actualMarks()
+      }
+      .chartXScale(domain: windowStart...windowEnd)
+      .chartYScale(
+        domain: min(0, window.remainingPercent - 10)...max(100, window.remainingPercent + 10)
+      )
+      .chartLegend(.hidden)
+      .chartXAxis(.hidden)
+      .chartYAxis {
+        AxisMarks(values: [0, 50, 100]) {
+          AxisGridLine()
+          AxisValueLabel(anchor: .trailing)
+        }
+      }
+      .accessibilityLabel("\(window.label) remaining usage chart")
+      .accessibilityValue(accessibilityValue)
+
+      HStack {
+        if window.kind == .fiveHour {
+          Text(windowStart, format: .dateTime.hour().minute())
+          Spacer()
+          Text(windowEnd, format: .dateTime.hour().minute())
+        } else {
+          Text(windowStart, format: .dateTime.month(.abbreviated).day())
+          Spacer()
+          Text(windowEnd, format: .dateTime.month(.abbreviated).day())
+        }
+      }
+      .font(.caption2)
+      .foregroundStyle(.secondary)
+      .accessibilityHidden(true)
+    }
+  }
+
+  @ChartContentBuilder
+  private func idealMarks() -> some ChartContent {
+    LineMark(
+      x: .value("Time", windowStart),
+      y: .value("Ideal remaining percent", 100),
+      series: .value("Series", "Ideal")
+    )
+    .foregroundStyle(.secondary)
+    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+
+    LineMark(
+      x: .value("Time", windowEnd),
+      y: .value("Ideal remaining percent", 0),
+      series: .value("Series", "Ideal")
+    )
+    .foregroundStyle(.secondary)
+    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+  }
+
+  @ChartContentBuilder
+  private func actualMarks() -> some ChartContent {
+    ForEach(samples.filter(\.isOverPace)) { sample in
+      AreaMark(
+        x: .value("Time", sample.date),
+        yStart: .value("Actual remaining percent", sample.remaining),
+        yEnd: .value("Ideal remaining percent", sample.ideal),
+        series: .value("Pace band", "Over")
+      )
+      .foregroundStyle(Color.red.opacity(0.18))
+    }
+
+    ForEach(samples.filter { !$0.isOverPace }) { sample in
+      AreaMark(
+        x: .value("Time", sample.date),
+        yStart: .value("Actual remaining percent", sample.remaining),
+        yEnd: .value("Ideal remaining percent", sample.ideal),
+        series: .value("Pace band", "Under")
+      )
+      .foregroundStyle(Color.green.opacity(0.18))
+    }
+
+    ForEach(samples) { sample in
+      LineMark(
+        x: .value("Time", sample.date),
+        y: .value("Actual remaining percent", sample.remaining),
+        series: .value("Series", "Actual")
+      )
+      .foregroundStyle(.primary)
+      .lineStyle(StrokeStyle(lineWidth: 2))
+    }
+
+    PointMark(
+      x: .value("Current time", freshness),
+      y: .value("Current remaining percent", window.remainingPercent)
+    )
+    .foregroundStyle(evaluation?.isOverPace == true ? .red : .green)
+    .symbolSize(30)
+    .annotation(position: .top, spacing: 4) {
+      Text("\(window.remainingPercent.formatted(.number.precision(.fractionLength(0))))%")
+        .font(.caption2.bold())
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background {
+          Capsule().fill(.regularMaterial)
+        }
+    }
+  }
+
+  private var accessibilityValue: String {
+    let remaining = window.remainingPercent.formatted(.number.precision(.fractionLength(0)))
+    if let evaluation {
+      return "\(remaining) percent remaining, \(evaluation.label)"
+    }
+    return "\(remaining) percent remaining"
+  }
+}
+
+private struct UnknownTimelineView: View {
+  let window: UsageWindowSnapshot
+
+  var body: some View {
+    VStack(spacing: 8) {
+      Text("\(window.remainingPercent.formatted(.number.precision(.fractionLength(0))))%")
+        .font(.system(.largeTitle, design: .rounded, weight: .semibold))
+      Label {
+        if let windowEnd = window.windowEnd {
+          Text("Resets \(windowEnd, format: .dateTime.month(.abbreviated).day().hour().minute())")
+        } else {
+          Text("Reset time unknown")
+        }
+      } icon: {
+        Image(systemName: "calendar.badge.exclamationmark")
+      }
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .frame(maxWidth: .infinity, minHeight: 120)
+  }
+}
+
+private struct ExhaustionBanner: View {
+  let date: Date?
+
+  var body: some View {
+    Label {
+      if let date {
+        Text("Runs out \(date, format: .dateTime.hour().minute())")
+      } else {
+        Text("Quota exhausted")
+      }
+    } icon: {
+      Image(systemName: "exclamationmark.octagon.fill")
+    }
+    .font(.caption.weight(.semibold))
+    .foregroundStyle(.red)
+    .padding(.horizontal, 8)
+    .padding(.vertical, 5)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background {
+      RoundedRectangle(cornerRadius: 7).fill(.red.opacity(0.1))
+    }
+  }
+}
+
+private struct UsageBreakdown: View {
+  let items: [UsageBreakdownItem]
+
+  var body: some View {
+    VStack(spacing: 5) {
+      ForEach(items) { item in
+        HStack(spacing: 8) {
+          Text(item.label)
+            .lineLimit(1)
+          ProgressView(value: item.usedPercent, total: 100)
+            .tint(item.usedPercent > 80 ? .orange : .accentColor)
+          Text("\(item.usedPercent.formatted(.number.precision(.fractionLength(0))))%")
+            .monospacedDigit()
+        }
+        .font(.caption)
+      }
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/UI/Dashboard/DashboardView.swift">
+import AppKit
+import SwiftUI
+
+private enum DashboardMode: String, CaseIterable, Identifiable {
+  case pace = "Pace"
+  case history = "History"
+
+  var id: String { rawValue }
+}
+
+struct DashboardView: View {
+  @Bindable var store: FenestraStore
+  @State private var mode: DashboardMode = .pace
+
+  var body: some View {
+    VStack(spacing: 0) {
+      DashboardHeader(store: store, mode: $mode)
+      Divider()
+      dashboardContent
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      Divider()
+      DashboardFooter(suggestion: store.smartSuggestion)
+    }
+    .frame(
+      width: store.selectedProvider == .antigravity ? 820 : 580,
+      height: 690
+    )
+    .containerBackground(.ultraThinMaterial, for: .window)
+    .task {
+      await store.start()
+    }
+  }
+
+  @ViewBuilder
+  private var dashboardContent: some View {
+    if store.settings.enabledProviders.isEmpty {
+      ContentUnavailableView {
+        Label("No providers enabled", systemImage: "switch.2")
+      } description: {
+        Text("Enable at least one provider in Settings.")
+      }
+    } else if mode == .history {
+      ActivityHistoryView(
+        activity: store.history.dailyActivity(providerID: store.selectedProvider),
+        pace: store.history.dailyWorstPace(providerID: store.selectedProvider)
+      )
+    } else {
+      ProviderStateView(
+        providerID: store.selectedProvider,
+        state: store.state(for: store.selectedProvider),
+        store: store
+      )
+    }
+  }
+}
+
+private struct DashboardHeader: View {
+  @Bindable var store: FenestraStore
+  @Binding var mode: DashboardMode
+
+  var body: some View {
+    VStack(spacing: 10) {
+      HStack(spacing: 10) {
+        Picker("Provider", selection: providerSelection) {
+          ForEach(store.settings.enabledProviders) { providerID in
+            Label(providerID.displayName, systemImage: providerID.systemImage)
+              .labelStyle(.titleAndIcon)
+              .tag(providerID)
+          }
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .accessibilityLabel("Provider")
+
+        Button("Refresh", systemImage: "arrow.clockwise") {
+          Task { await store.refresh(store.selectedProvider) }
+        }
+        .labelStyle(.iconOnly)
+        .help("Refresh")
+        .disabled(!store.settings.isEnabled(store.selectedProvider))
+
+        SettingsLink {
+          Label("Settings", systemImage: "gear")
+            .labelStyle(.iconOnly)
+        }
+        .help("Settings")
+      }
+
+      Picker("View", selection: $mode) {
+        ForEach(DashboardMode.allCases) { item in
+          Text(item.rawValue).tag(item)
+        }
+      }
+      .labelsHidden()
+      .pickerStyle(.segmented)
+      .controlSize(.small)
+      .frame(maxWidth: 220)
+    }
+    .padding(14)
+  }
+
+  private var providerSelection: Binding<ProviderID> {
+    Binding(
+      get: { store.selectedProvider },
+      set: { store.select($0) }
+    )
+  }
+}
+
+private struct DashboardFooter: View {
+  let suggestion: String
+
+  var body: some View {
+    HStack {
+      Label(suggestion, systemImage: "arrow.triangle.branch")
+        .font(.callout)
+        .foregroundStyle(.secondary)
+      Spacer()
+      Button("Quit") {
+        NSApplication.shared.terminate(nil)
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+  }
+}
+
+private struct ProviderStateView: View {
+  let providerID: ProviderID
+  let state: ProviderDisplayState
+  let store: FenestraStore
+
+  var body: some View {
+    switch state.availability {
+    case .idle, .loading:
+      if let snapshot = state.snapshot {
+        ProviderDashboardContent(snapshot: snapshot, errorMessage: nil, store: store)
+      } else {
+        ProgressView()
+          .controlSize(.small)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .accessibilityLabel("Loading \(providerID.displayName) usage")
+      }
+    case .unavailable(let message) where state.snapshot == nil:
+      UnavailableProviderView(providerID: providerID, message: message, store: store)
+    default:
+      if let snapshot = state.snapshot {
+        ProviderDashboardContent(
+          snapshot: snapshot,
+          errorMessage: errorMessage,
+          store: store
+        )
+      } else {
+        UnavailableProviderView(
+          providerID: providerID,
+          message: "\(providerID.displayName): no usage data",
+          store: store
+        )
+      }
+    }
+  }
+
+  private var errorMessage: String? {
+    if case .unavailable(let message) = state.availability {
+      return message
+    }
+    return nil
+  }
+}
+
+private struct UnavailableProviderView: View {
+  let providerID: ProviderID
+  let message: String
+  let store: FenestraStore
+
+  var body: some View {
+    ContentUnavailableView {
+      Label(providerID.displayName, systemImage: providerID.systemImage)
+    } description: {
+      Text(message)
+    } actions: {
+      if providerID == .claudeCode, message.localizedCaseInsensitiveContains("Keychain") {
+        Button("Allow OAuth Access") {
+          Task { await store.authorizeClaudeKeychainAccess() }
+        }
+      } else if providerID == .antigravity {
+        Button("Open Antigravity") {
+          Task { await store.openAntigravity() }
+        }
+      } else if providerID == .cursor,
+        store.settings.cursorBrowserAccessEnabled,
+        message.localizedCaseInsensitiveContains("Keychain")
+      {
+        Button("Allow Browser Access") {
+          Task { await store.authorizeCursorBrowserAccess() }
+        }
+      }
+    }
+    .padding()
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/UI/Dashboard/ProviderDashboardContent.swift">
+import SwiftUI
+
+struct ProviderDashboardContent: View {
+  let snapshot: UsageSnapshot
+  let errorMessage: String?
+  let store: FenestraStore
+
+  var body: some View {
+    ScrollView {
+      LazyVStack(alignment: .leading, spacing: 12) {
+        FreshnessLine(snapshot: snapshot)
+        if let errorMessage {
+          StaleDataBanner(message: errorMessage)
+        }
+        if snapshot.providerID == .antigravity {
+          AntigravityPoolsView(snapshot: snapshot, store: store)
+        } else {
+          StandardPoolsView(snapshot: snapshot, store: store)
+        }
+        SnapshotDetails(snapshot: snapshot)
+      }
+      .padding(14)
+    }
+    .scrollEdgeEffectStyle(.soft, for: .top)
+  }
+}
+
+private struct FreshnessLine: View {
+  let snapshot: UsageSnapshot
+
+  var body: some View {
+    HStack(spacing: 4) {
+      Text("Updated")
+      Text(snapshot.freshness, style: .relative)
+      Text("·")
+      Text("Source: \(snapshot.sourceDescription)")
+      if let account = snapshot.accountDescription, !account.isEmpty {
+        Text("·")
+        Text(account)
+          .lineLimit(1)
+      }
+    }
+    .font(.caption)
+    .foregroundStyle(.secondary)
+    .accessibilityElement(children: .combine)
+  }
+}
+
+private struct StaleDataBanner: View {
+  let message: String
+
+  var body: some View {
+    Label(message, systemImage: "exclamationmark.triangle.fill")
+      .font(.caption)
+      .foregroundStyle(.orange)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 6)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background {
+        RoundedRectangle(cornerRadius: 8)
+          .fill(.orange.opacity(0.1))
+      }
+  }
+}
+
+private struct StandardPoolsView: View {
+  let snapshot: UsageSnapshot
+  let store: FenestraStore
+
+  var body: some View {
+    ForEach(snapshot.pools) { pool in
+      PoolColumn(snapshot: snapshot, pool: pool, store: store)
+    }
+  }
+}
+
+private struct AntigravityPoolsView: View {
+  let snapshot: UsageSnapshot
+  let store: FenestraStore
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 12) {
+      ForEach(snapshot.pools) { pool in
+        PoolColumn(snapshot: snapshot, pool: pool, store: store)
+          .frame(maxWidth: .infinity, alignment: .top)
+      }
+    }
+  }
+}
+
+private struct PoolColumn: View {
+  let snapshot: UsageSnapshot
+  let pool: UsagePoolSnapshot
+  let store: FenestraStore
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      if snapshot.providerID == .antigravity {
+        Text(pool.name)
+          .font(.headline)
+      }
+      ForEach(pool.windows) { window in
+        WindowPanel(
+          providerID: snapshot.providerID,
+          pool: pool,
+          window: window,
+          freshness: snapshot.freshness,
+          history: store.historyPoints(
+            providerID: snapshot.providerID,
+            poolID: pool.id,
+            windowID: window.id,
+            since: window.windowStart
+          ),
+          evaluation: store.paceEvaluation(
+            providerID: snapshot.providerID,
+            pool: pool,
+            window: window,
+            at: snapshot.freshness
+          )
+        )
+      }
+    }
+  }
+}
+
+private struct SnapshotDetails: View {
+  let snapshot: UsageSnapshot
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 5) {
+      if let cacheHitRate = snapshot.cacheHitRate {
+        Label(
+          "Cache \(cacheHitRate.formatted(.number.precision(.fractionLength(0))))%",
+          systemImage: "memorychip"
+        )
+      }
+      ForEach(snapshot.notes, id: \.self) { note in
+        Text(note)
+      }
+    }
+    .font(.caption)
+    .foregroundStyle(.secondary)
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/UI/History/ActivityHistoryView.swift">
+import Charts
+import SwiftUI
+
+private struct HeatCell: Identifiable {
+  var id: Date { date }
+  let date: Date
+  let week: Date
+  let weekday: Int
+  let amount: Double
+}
+
+struct ActivityHistoryView: View {
+  let activity: [DailyActivity]
+  let pace: [DailyPace]
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 22) {
+        Text("90-day activity")
+          .font(.headline)
+        ActivityHeatmap(cells: heatCells)
+          .frame(height: 180)
+
+        Text("Worst daily pace")
+          .font(.headline)
+        PaceSparkline(points: pace)
+          .frame(height: 190)
+      }
+      .padding(18)
+    }
+    .scrollEdgeEffectStyle(.soft, for: .top)
+  }
+
+  private var heatCells: [HeatCell] {
+    let calendar = Calendar.autoupdatingCurrent
+    let values = Dictionary(
+      uniqueKeysWithValues: activity.map {
+        (calendar.startOfDay(for: $0.date), $0.amount)
+      })
+    return (0..<90).compactMap { offset in
+      guard let date = calendar.date(byAdding: .day, value: -offset, to: Date()) else {
+        return nil
+      }
+      let day = calendar.startOfDay(for: date)
+      let weekday = calendar.component(.weekday, from: day)
+      let week = calendar.dateInterval(of: .weekOfYear, for: day)?.start ?? day
+      return HeatCell(
+        date: day,
+        week: week,
+        weekday: weekday,
+        amount: values[day] ?? 0
+      )
+    }
+  }
+}
+
+private struct ActivityHeatmap: View {
+  let cells: [HeatCell]
+
+  var body: some View {
+    Chart(cells) { cell in
+      RectangleMark(
+        x: .value("Week", cell.week, unit: .weekOfYear),
+        y: .value("Weekday", cell.weekday)
+      )
+      .foregroundStyle(activityColor(cell.amount))
+      .cornerRadius(2)
+    }
+    .chartYAxis {
+      AxisMarks(values: [2, 4, 6]) { value in
+        AxisValueLabel {
+          if let day = value.as(Int.self) {
+            Text(weekdayLabel(day))
+          }
+        }
+      }
+    }
+    .chartXAxis {
+      AxisMarks(values: .stride(by: .month)) {
+        AxisValueLabel(format: .dateTime.month(.abbreviated))
+      }
+    }
+    .chartLegend(.hidden)
+    .accessibilityLabel("Daily usage activity heatmap")
+  }
+
+  private func activityColor(_ amount: Double) -> Color {
+    guard amount > 0 else { return .secondary.opacity(0.12) }
+    return .green.opacity(min(0.9, 0.25 + amount / 40))
+  }
+
+  private func weekdayLabel(_ weekday: Int) -> String {
+    let symbols = Calendar.autoupdatingCurrent.shortWeekdaySymbols
+    guard symbols.indices.contains(weekday - 1) else { return "" }
+    return symbols[weekday - 1]
+  }
+}
+
+private struct PaceSparkline: View {
+  let points: [DailyPace]
+
+  var body: some View {
+    if points.isEmpty {
+      ContentUnavailableView(
+        "No pace history",
+        systemImage: "chart.xyaxis.line"
+      )
+    } else {
+      Chart(points) { point in
+        AreaMark(
+          x: .value("Date", point.date),
+          yStart: .value("Pace delta", point.delta),
+          yEnd: .value("Neutral", 0)
+        )
+        .foregroundStyle(point.delta < 0 ? .red.opacity(0.15) : .green.opacity(0.15))
+
+        LineMark(
+          x: .value("Date", point.date),
+          y: .value("Pace delta", point.delta)
+        )
+        .foregroundStyle(point.delta < 0 ? .red : .green)
+
+        PointMark(
+          x: .value("Date", point.date),
+          y: .value("Pace delta", point.delta)
+        )
+        .foregroundStyle(point.delta < 0 ? .red : .green)
+        .symbolSize(24)
+      }
+      .chartYAxis {
+        AxisMarks {
+          AxisGridLine()
+          AxisValueLabel()
+        }
+      }
+      .accessibilityLabel("Worst daily pace delta")
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/Fenestra/UI/Settings/SettingsView.swift">
+import AppKit
+import SwiftUI
+
+struct SettingsView: View {
+  let store: FenestraStore
+
+  var body: some View {
+    @Bindable var settings = store.settings
+
+    Form {
+      Section("Providers") {
+        ProviderSettingRow(
+          name: "Claude",
+          isEnabled: $settings.claudeEnabled,
+          cadence: $settings.claudeCadence
+        )
+        ProviderSettingRow(
+          name: "Codex",
+          isEnabled: $settings.codexEnabled,
+          cadence: $settings.codexCadence
+        )
+        ProviderSettingRow(
+          name: "Antigravity",
+          isEnabled: $settings.antigravityEnabled,
+          cadence: $settings.antigravityCadence
+        )
+        ProviderSettingRow(
+          name: "Cursor",
+          isEnabled: $settings.cursorEnabled,
+          cadence: $settings.cursorCadence
+        )
+      }
+
+      Section {
+        Toggle("Manual weekly reset", isOn: $settings.useClaudeWeeklyResetOverride)
+        if settings.useClaudeWeeklyResetOverride {
+          DatePicker(
+            "Next reset",
+            selection: $settings.claudeWeeklyResetOverride,
+            in: Date()...,
+            displayedComponents: [.date, .hourAndMinute]
+          )
+        }
+        Picker("Cache poll", selection: $settings.claudeCachePollCadence) {
+          ForEach(RefreshCadence.allCases) { cadence in
+            Text(cadence.label).tag(cadence)
+          }
+        }
+      } header: {
+        Text("Claude")
+      }
+
+      Section {
+        Toggle("Browser cookies", isOn: $settings.cursorBrowserAccessEnabled)
+      } header: {
+        Text("Cursor")
+      } footer: {
+        Text(
+          "Fenestra never opens a Keychain dialog in the background. After enabling "
+            + "browser cookies, use Allow Browser Access in the Cursor tab if needed. "
+            + "Safari may require Full Disk Access. Cursor.app and Firefox need neither."
+        )
+      }
+
+      Section("Alerts") {
+        Toggle("Notifications", isOn: $settings.notificationsEnabled)
+        HStack {
+          Text("Bad pace")
+          Slider(value: $settings.badPaceThreshold, in: -75 ... -5, step: 5)
+          Text(
+            "\(settings.badPaceThreshold.formatted(.number.precision(.fractionLength(0))))%"
+          )
+          .monospacedDigit()
+          .frame(width: 42, alignment: .trailing)
+        }
+      }
+
+      Section("Privacy") {
+        Text("Provider endpoints only · No analytics · Local history")
+          .foregroundStyle(.secondary)
+        Button("Show debug log") {
+          NSWorkspace.shared.activateFileViewerSelecting([LocalLog.fileURL])
+        }
+      }
+    }
+    .formStyle(.grouped)
+    .scenePadding()
+    .frame(width: 560, height: 600)
+  }
+}
+
+private struct ProviderSettingRow: View {
+  let name: String
+  @Binding var isEnabled: Bool
+  @Binding var cadence: RefreshCadence
+
+  var body: some View {
+    HStack {
+      Toggle(name, isOn: $isEnabled)
+      Spacer()
+      Picker("Refresh", selection: $cadence) {
+        ForEach(RefreshCadence.allCases) { item in
+          Text(item.label).tag(item)
+        }
+      }
+      .labelsHidden()
+      .frame(width: 110)
+      .disabled(!isEnabled)
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/FenestraTests/AppSettingsTests.swift">
+import Foundation
+import Testing
+
+@testable import Fenestra
+
+@Suite("Settings persistence")
+struct AppSettingsTests {
+  @Test @MainActor
+  func loadingOneSettingDoesNotOverwriteSettingsNotYetLoaded() throws {
+    let suiteName = "FenestraTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set(false, forKey: "providers.claude.enabled")
+    defaults.set(RefreshCadence.fiveMinutes.rawValue, forKey: "providers.codex.cadence")
+    defaults.set(-200.0, forKey: "notifications.badPaceThreshold")
+
+    let settings = AppSettings(defaults: defaults)
+    settings.load()
+
+    #expect(!settings.claudeEnabled)
+    #expect(settings.codexCadence == .fiveMinutes)
+    #expect(settings.badPaceThreshold == -75)
+  }
+
+  @Test @MainActor
+  func expiredClaudeResetOverrideIsDisabledInsteadOfInventingANewReset() throws {
+    let suiteName = "FenestraTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set(true, forKey: "providers.claude.useWeeklyResetOverride")
+    defaults.set(
+      Date().addingTimeInterval(-60),
+      forKey: "providers.claude.weeklyResetOverride"
+    )
+
+    let settings = AppSettings(defaults: defaults)
+    settings.load()
+
+    #expect(!settings.useClaudeWeeklyResetOverride)
+    #expect(settings.manualClaudeWeeklyReset == nil)
+  }
+}
+
+@Suite("Network restrictions")
+struct RestrictedHTTPClientTests {
+  @Test
+  func onlyProviderHTTPSAndLoopbackURLsAreAllowed() {
+    #expect(
+      RestrictedHTTPClient.isAllowed(
+        URL(string: "https://api.anthropic.com/api/oauth/usage")
+      ))
+    #expect(
+      !RestrictedHTTPClient.isAllowed(
+        URL(string: "http://api.anthropic.com/api/oauth/usage")
+      ))
+    #expect(
+      !RestrictedHTTPClient.isAllowed(
+        URL(string: "https://api.anthropic.com.evil.example/steal")
+      ))
+    #expect(
+      RestrictedHTTPClient.isAllowed(
+        URL(string: "http://127.0.0.1:12345/local")
+      ))
+  }
+}
+</file>
+
+<file path="Fenestra/FenestraTests/ClaudeCacheAnalyzerTests.swift">
+import Foundation
+import Testing
+
+@testable import Fenestra
+
+@Suite("Claude cache analysis")
+@MainActor
+struct ClaudeCacheAnalyzerTests {
+  @Test
+  func deduplicatesUUIDsAndReanalyzesOnlyChangedFileState() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appending(path: "fenestra-claude-cache-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: false
+    )
+
+    let first = directory.appending(path: "a.jsonl")
+    let second = directory.appending(path: "b.jsonl")
+    try write(
+      [
+        usageLine(uuid: "duplicate", cacheRead: 80, cacheCreation: 10, input: 10)
+      ],
+      to: first
+    )
+    try write(
+      [
+        usageLine(uuid: "duplicate", cacheRead: 1, cacheCreation: 0, input: 99),
+        usageLine(uuid: "second", cacheRead: 20, cacheCreation: 0, input: 80),
+      ],
+      to: second
+    )
+
+    let initial = await ClaudeCacheAnalyzer.shared.analyze(projectsURL: directory)
+    #expect(abs(try #require(initial.hitRate) - 50) < 0.0001)
+
+    try write(
+      [
+        usageLine(uuid: "duplicate", cacheRead: 1, cacheCreation: 0, input: 99),
+        usageLine(uuid: "second", cacheRead: 20, cacheCreation: 0, input: 80),
+        usageLine(uuid: "third", cacheRead: 100, cacheCreation: 0, input: 0),
+      ],
+      to: second
+    )
+    let updated = await ClaudeCacheAnalyzer.shared.analyze(projectsURL: directory)
+    #expect(abs(try #require(updated.hitRate) - 66.666_666_666_7) < 0.0001)
+  }
+
+  private func usageLine(
+    uuid: String,
+    cacheRead: Int,
+    cacheCreation: Int,
+    input: Int
+  ) -> String {
+    """
+    {"uuid":"\(uuid)","message":{"usage":{"cache_read_input_tokens":\(cacheRead),"cache_creation_input_tokens":\(cacheCreation),"input_tokens":\(input)}}}
+    """
+  }
+
+  private func write(_ lines: [String], to url: URL) throws {
+    try Data((lines.joined(separator: "\n") + "\n").utf8)
+      .write(to: url, options: .atomic)
+  }
+}
+</file>
+
+<file path="Fenestra/FenestraTests/CursorCookieStoreTests.swift">
+import Foundation
+import SQLite3
+import Testing
+
+@testable import Fenestra
+
+@Suite("Cursor cookie safety")
+struct CursorCookieStoreTests {
+  @Test
+  func onlyAcceptsCursorRegistrableDomains() {
+    #expect(CursorBrowserCookieStore.isCursorDomain("cursor.com"))
+    #expect(CursorBrowserCookieStore.isCursorDomain(".auth.cursor.com"))
+    #expect(CursorBrowserCookieStore.isCursorDomain("cursor.sh"))
+    #expect(!CursorBrowserCookieStore.isCursorDomain("evilcursor.com"))
+    #expect(!CursorBrowserCookieStore.isCursorDomain("cursor.com.evil.example"))
+  }
+
+  @Test @MainActor
+  func readsFirefoxSchemaAndRejectsLookalikeDomains() throws {
+    let database = FileManager.default.temporaryDirectory
+      .appending(path: "fenestra-firefox-\(UUID().uuidString).sqlite")
+    defer { try? FileManager.default.removeItem(at: database) }
+
+    var db: OpaquePointer?
+    let openStatus = sqlite3_open(database.path, &db)
+    guard openStatus == SQLITE_OK else {
+      throw ProviderFailure.unavailable("Could not create Firefox fixture")
+    }
+    defer {
+      if let db {
+        sqlite3_close(db)
+      }
+    }
+    try execute(
+      db,
+      """
+      CREATE TABLE moz_cookies (name TEXT, value TEXT, host TEXT);
+      INSERT INTO moz_cookies VALUES
+        ('WorkosCursorSessionToken', 'valid', '.cursor.com'),
+        ('WorkosCursorSessionToken', 'malicious', 'evilcursor.com'),
+        ('unrelated', 'private', '.cursor.com');
+      """
+    )
+    sqlite3_close(db)
+    db = nil
+
+    let cookies = try #require(
+      CursorBrowserCookieStore.queryFirefoxCookies(database: database)
+    )
+    #expect(cookies.count == 1)
+    #expect(cookies.first?.name == "WorkosCursorSessionToken")
+    #expect(cookies.first?.value == "valid")
+  }
+
+  private func execute(_ db: OpaquePointer?, _ sql: String) throws {
+    var errorMessage: UnsafeMutablePointer<CChar>?
+    defer { sqlite3_free(errorMessage) }
+    let status = sqlite3_exec(db, sql, nil, nil, &errorMessage)
+    guard status == SQLITE_OK else {
+      let message = errorMessage.map { String(cString: $0) } ?? "SQLite error \(status)"
+      throw ProviderFailure.unavailable(message)
+    }
+  }
+}
+</file>
+
+<file path="Fenestra/FenestraTests/CursorUsageResolverTests.swift">
+import Testing
+
+@testable import Fenestra
+
+@Suite("Cursor usage resolution")
+struct CursorUsageResolverTests {
+  @Test @MainActor
+  func reportedPercentageWinsOverContradictoryRawDollarFields() throws {
+    let summary = CursorUsageSummary(
+      billingCycleStart: nil,
+      billingCycleEnd: nil,
+      membershipType: nil,
+      individualUsage: CursorIndividualUsage(
+        plan: CursorPlanUsage(
+          used: 2_000,
+          limit: 2_000,
+          totalPercentUsed: 27.166_666_666_7
+        ),
+        overall: nil
+      )
+    )
+
+    let result = try CursorUsageResolver.resolve(
+      summary: summary,
+      legacy: nil,
+      breakdown: []
+    )
+
+    #expect(abs(result.quotaTotal - 20) < 0.0001)
+    #expect(abs(result.used - 5.433_333_333_34) < 0.0001)
+    #expect(abs(result.totalPercent - 27.166_666_666_7) < 0.0001)
+  }
+
+  @Test @MainActor
+  func rawDollarRatioRemainsAvailableAsFallback() throws {
+    let summary = CursorUsageSummary(
+      billingCycleStart: nil,
+      billingCycleEnd: nil,
+      membershipType: nil,
+      individualUsage: CursorIndividualUsage(
+        plan: CursorPlanUsage(used: 500, limit: 2_000, totalPercentUsed: nil),
+        overall: nil
+      )
+    )
+
+    let result = try CursorUsageResolver.resolve(
+      summary: summary,
+      legacy: nil,
+      breakdown: []
+    )
+
+    #expect(abs(result.used - 5) < 0.0001)
+    #expect(abs(result.totalPercent - 25) < 0.0001)
+  }
+}
+</file>
+
+<file path="Fenestra/FenestraTests/HistoryStoreTests.swift">
+import Foundation
+import Testing
+
+@testable import Fenestra
+
+@Suite("History persistence")
+@MainActor
+struct HistoryStoreTests {
+  @Test
+  func coalescesSmallFrequentSamplesButKeepsSignificantChanges() {
+    let fileURL = FileManager.default.temporaryDirectory
+      .appending(path: "fenestra-history-\(UUID().uuidString).json")
+    defer { try? FileManager.default.removeItem(at: fileURL) }
+
+    let store = HistoryStore(fileURL: fileURL)
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    store.append(snapshot(at: start, remaining: 90))
+    store.append(snapshot(at: start.addingTimeInterval(60), remaining: 89.5))
+    #expect(store.points.count == 1)
+
+    store.append(snapshot(at: start.addingTimeInterval(120), remaining: 88.5))
+    #expect(store.points.count == 2)
+
+    store.append(snapshot(at: start.addingTimeInterval(12 * 60), remaining: 88.4))
+    #expect(store.points.count == 3)
+  }
+
+  private func snapshot(at date: Date, remaining: Double) -> UsageSnapshot {
+    UsageSnapshot(
+      providerID: .claudeCode,
+      displayName: "Claude",
+      pools: [
+        UsagePoolSnapshot(
+          id: "default",
+          name: "Default",
+          windows: [
+            UsageWindowSnapshot(
+              id: "five-hour",
+              kind: .fiveHour,
+              label: "5-hour",
+              windowStart: date.addingTimeInterval(-60),
+              windowEnd: date.addingTimeInterval(5 * 60 * 60),
+              quotaTotal: 100,
+              used: 100 - remaining,
+              remainingPercent: remaining,
+              resetSource: "Test",
+              breakdown: []
+            )
+          ]
+        )
+      ],
+      freshness: date,
+      sourceDescription: "Test",
+      cacheHitRate: nil,
+      accountDescription: nil,
+      notes: []
+    )
+  }
+}
+</file>
+
+<file path="Fenestra/FenestraTests/PaceCalculatorTests.swift">
+import XCTest
+
+@testable import Fenestra
+
+final class PaceCalculatorTests: XCTestCase {
+  @MainActor
+  func testIdealRemainingAtMidpoint() throws {
+    let start = Date(timeIntervalSince1970: 1_000)
+    let end = start.addingTimeInterval(300)
+    let midpoint = start.addingTimeInterval(150)
+
+    let value = try XCTUnwrap(
+      PaceCalculator.idealRemaining(
+        at: midpoint,
+        windowStart: start,
+        windowEnd: end
+      )
+    )
+    XCTAssertEqual(value, 50, accuracy: 0.0001)
+  }
+
+  @MainActor
+  func testDeltaIsPositiveWhenUnderPace() throws {
+    let start = Date(timeIntervalSince1970: 1_000)
+    let end = start.addingTimeInterval(300)
+    let midpoint = start.addingTimeInterval(150)
+
+    let value = try XCTUnwrap(
+      PaceCalculator.delta(
+        remainingPercent: 65,
+        at: midpoint,
+        windowStart: start,
+        windowEnd: end
+      )
+    )
+    XCTAssertEqual(value, 15, accuracy: 0.0001)
+  }
+
+  @MainActor
+  func testUnknownTimelineProducesNoPace() {
+    XCTAssertNil(
+      PaceCalculator.delta(
+        remainingPercent: 50,
+        at: Date(),
+        windowStart: nil,
+        windowEnd: nil
+      )
+    )
+  }
+
+  @MainActor
+  func testExhaustedQuotaHasNoFutureProjection() {
+    XCTAssertNil(
+      PaceCalculator.projectedExhaustion(
+        remainingPercent: 0,
+        now: Date(),
+        recentHistory: []
+      )
+    )
+  }
+
+  @MainActor
+  func testProjectedExhaustionUsesRecentBurnRate() throws {
+    let now = Date(timeIntervalSince1970: 10_000)
+    let first = HistoryPoint(
+      providerID: .codex,
+      poolID: "default",
+      windowID: "weekly",
+      timestamp: now.addingTimeInterval(-1_800),
+      remainingPercent: 50,
+      paceDelta: nil
+    )
+    let last = HistoryPoint(
+      providerID: .codex,
+      poolID: "default",
+      windowID: "weekly",
+      timestamp: now,
+      remainingPercent: 40,
+      paceDelta: nil
+    )
+
+    let result = try XCTUnwrap(
+      PaceCalculator.projectedExhaustion(
+        remainingPercent: 40,
+        now: now,
+        recentHistory: [first, last]
+      ))
+
+    XCTAssertEqual(
+      result.timeIntervalSince(now),
+      7_200,
+      accuracy: 0.001
+    )
+  }
+}
+</file>
+
+<file path="Fenestra/FenestraTests/ProviderDateParserTests.swift">
+import Foundation
+import Testing
+
+@testable import Fenestra
+
+@Suite("Provider timeline validation")
+struct ProviderDateParserTests {
+  @Test
+  func onlyAcceptsAWindowThatContainsTheSnapshotTime() {
+    let now = Date(timeIntervalSince1970: 10_000)
+    let active = ProviderDateParser.activeWindow(
+      start: now.addingTimeInterval(-60),
+      end: now.addingTimeInterval(60),
+      at: now
+    )
+    #expect(active.start != nil)
+    #expect(active.end != nil)
+
+    let expired = ProviderDateParser.activeWindow(
+      start: now.addingTimeInterval(-120),
+      end: now.addingTimeInterval(-60),
+      at: now
+    )
+    #expect(expired.start == nil)
+    #expect(expired.end == nil)
+
+    let future = ProviderDateParser.activeWindow(
+      start: now.addingTimeInterval(60),
+      end: now.addingTimeInterval(120),
+      at: now
+    )
+    #expect(future.start == nil)
+    #expect(future.end == nil)
+  }
+}
+</file>
+
+</files>

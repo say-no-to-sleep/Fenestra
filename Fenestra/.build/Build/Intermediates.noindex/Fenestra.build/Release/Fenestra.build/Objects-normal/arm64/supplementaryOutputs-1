@@ -1,0 +1,12 @@
+{
+  "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/Fenestra/App/FenestraApp.swift" : {
+    "abi-baseline-json" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra.abi.json",
+    "const-values" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra-primary.swiftconstvalues",
+    "dependencies" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra-primary.d",
+    "diagnostics" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra-primary.dia",
+    "objc-header" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra-Swift.h",
+    "swiftdoc" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra.swiftdoc",
+    "swiftmodule" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra.swiftmodule",
+    "swiftsourceinfo" : "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Intermediates.noindex/Fenestra.build/Release/Fenestra.build/Objects-normal/arm64/Fenestra.swiftsourceinfo"
+  }
+}

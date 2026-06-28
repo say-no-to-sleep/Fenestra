@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+destination="${HOME}/Library/Application Support/Fenestra/claude-statusline.json"
+mkdir -p "$(dirname "${destination}")"
+temporary="$(mktemp "${destination}.tmp.XXXXXX")"
+cleanup() {
+  rm -f "${temporary}"
+}
+trap cleanup EXIT HUP INT TERM
+cat > "${temporary}"
+mv "${temporary}" "${destination}"
+trap - EXIT HUP INT TERM
+
+if command -v jq >/dev/null 2>&1; then
+  jq -r '"\(.model.display_name // "Claude") · \(.context_window.used_percentage // 0)% ctx"' "${destination}"
+else
+  printf 'Claude\n'
+fi

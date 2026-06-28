@@ -1,0 +1,120 @@
+{
+  "source": "/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/Fenestra/UI/Dashboard/DashboardView.swift",
+  "tables": {
+    "Localizable": [
+      {
+        "comment": "",
+        "key": "No providers enabled",
+        "location": {
+          "startingColumn": 15,
+          "startingLine": 38
+        }
+      },
+      {
+        "comment": "",
+        "key": "Enable at least one provider in Settings.",
+        "location": {
+          "startingColumn": 14,
+          "startingLine": 40
+        }
+      },
+      {
+        "comment": "",
+        "key": "View",
+        "location": {
+          "startingColumn": 14,
+          "startingLine": 89
+        }
+      },
+      {
+        "comment": "",
+        "key": "Provider",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 64
+        }
+      },
+      {
+        "comment": "",
+        "key": "Provider",
+        "location": {
+          "startingColumn": 29,
+          "startingLine": 73
+        }
+      },
+      {
+        "comment": "",
+        "key": "Refresh",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 75
+        }
+      },
+      {
+        "comment": "",
+        "key": "Refresh",
+        "location": {
+          "startingColumn": 15,
+          "startingLine": 79
+        }
+      },
+      {
+        "comment": "",
+        "key": "Settings",
+        "location": {
+          "startingColumn": 15,
+          "startingLine": 86
+        }
+      },
+      {
+        "comment": "",
+        "key": "Settings",
+        "location": {
+          "startingColumn": 17,
+          "startingLine": 83
+        }
+      },
+      {
+        "comment": "",
+        "key": "Quit",
+        "location": {
+          "startingColumn": 14,
+          "startingLine": 119
+        }
+      },
+      {
+        "comment": "",
+        "key": "Loading %@ usage",
+        "location": {
+          "startingColumn": 31,
+          "startingLine": 144
+        }
+      },
+      {
+        "comment": "",
+        "key": "Allow OAuth Access",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 185
+        }
+      },
+      {
+        "comment": "",
+        "key": "Open Antigravity",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 189
+        }
+      },
+      {
+        "comment": "",
+        "key": "Allow Browser Access",
+        "location": {
+          "startingColumn": 16,
+          "startingLine": 196
+        }
+      }
+    ]
+  },
+  "version": 1
+}
