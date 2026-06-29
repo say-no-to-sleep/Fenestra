@@ -1,5 +1,0 @@
----
-triple:          'arm64-apple-darwin'
-binary-path:     '/Users/eugenezhao/Desktop/Fun/Fenestra/Fenestra/.build/Build/Products/Release/Fenestra.app/Contents/MacOS/Fenestra'
-relocations:     []
-...
