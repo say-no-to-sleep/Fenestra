@@ -180,11 +180,7 @@ enum AntigravityCloudFallback {
     request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("antigravity", forHTTPHeaderField: "User-Agent")
-    let (data, response) = try await RestrictedHTTPClient.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw ProviderFailure.invalidResponse("Antigravity: invalid Cloud Code response")
-    }
-    return (data, http)
+    return try await RestrictedHTTPClient.data(for: request)
   }
 
   private static func unwrap(_ raw: String) -> String? {

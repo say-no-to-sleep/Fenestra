@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 enum PaceThemeStyle: String, CaseIterable, Identifiable, Codable, Sendable {
@@ -22,35 +21,9 @@ struct PaceTheme: Equatable {
   static let classic = PaceTheme(underPace: .green, overPace: .red)
 
   static let bluePurple = PaceTheme(
-    underPace: adaptivePaceColor(red: 67, green: 44, blue: 95),
-    overPace: adaptivePaceColor(red: 29, green: 37, blue: 84)
+    underPace: .blue,
+    overPace: .purple
   )
-
-  private static func adaptivePaceColor(red: Int, green: Int, blue: Int) -> Color {
-    let light = (
-      CGFloat(red) / 255,
-      CGFloat(green) / 255,
-      CGFloat(blue) / 255
-    )
-    let lighten: CGFloat = 0.58
-    let dark = (
-      light.0 + (1 - light.0) * lighten,
-      light.1 + (1 - light.1) * lighten,
-      light.2 + (1 - light.2) * lighten
-    )
-    return Color(
-      nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-        let rgb: (CGFloat, CGFloat, CGFloat)
-        switch appearance.bestMatch(from: [.darkAqua, .aqua]) {
-        case .darkAqua:
-          rgb = dark
-        default:
-          rgb = light
-        }
-        return NSColor(red: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1)
-      })
-    )
-  }
 
   static func palette(for style: PaceThemeStyle) -> PaceTheme {
     switch style {
@@ -85,13 +58,6 @@ struct PaceTheme: Equatable {
   }
 }
 
-private struct PaceThemeKey: EnvironmentKey {
-  static let defaultValue = PaceTheme.classic
-}
-
 extension EnvironmentValues {
-  var paceTheme: PaceTheme {
-    get { self[PaceThemeKey.self] }
-    set { self[PaceThemeKey.self] = newValue }
-  }
+  @Entry var paceTheme = PaceTheme.classic
 }

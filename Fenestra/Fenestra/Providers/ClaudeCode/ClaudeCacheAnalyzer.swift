@@ -2,6 +2,20 @@ import Foundation
 
 struct ClaudeCacheAnalysis: Sendable {
   let hitRate: Double?
+  // (timestamp, total tokens) per message, sorted by time. Used to sum usage per window.
+  var tokenEvents: [TokenEvent] = []
+
+  struct TokenEvent: Sendable {
+    let timestamp: Date
+    let tokens: Double
+  }
+
+  /// Total tokens consumed since `start` (nil if the window start is unknown).
+  func tokensUsed(since start: Date?) -> Double? {
+    guard let start else { return nil }
+    let total = tokenEvents.lazy.filter { $0.timestamp >= start }.reduce(0) { $0 + $1.tokens }
+    return total > 0 ? total : nil
+  }
 }
 
 actor ClaudeCacheAnalyzer {
@@ -17,9 +31,13 @@ actor ClaudeCacheAnalyzer {
 
   private struct UsageRecord {
     let uuid: String?
+    let timestamp: Date?
     let cacheRead: Double
     let cacheCreation: Double
     let input: Double
+    let output: Double
+
+    var totalTokens: Double { cacheRead + cacheCreation + input + output }
   }
 
   private struct CachedFile {
@@ -142,6 +160,7 @@ actor ClaudeCacheAnalyzer {
     var cacheRead = 0.0
     var cacheCreation = 0.0
     var input = 0.0
+    var tokenEvents: [ClaudeCacheAnalysis.TokenEvent] = []
 
     for fileURL in cachedFiles.keys.sorted(by: { $0.path < $1.path }) {
       for record in cachedFiles[fileURL]?.records ?? [] {
@@ -151,12 +170,16 @@ actor ClaudeCacheAnalyzer {
         cacheRead += record.cacheRead
         cacheCreation += record.cacheCreation
         input += record.input
+        if let timestamp = record.timestamp, record.totalTokens > 0 {
+          tokenEvents.append(.init(timestamp: timestamp, tokens: record.totalTokens))
+        }
       }
     }
 
     let denominator = cacheRead + cacheCreation + input
     latestAnalysis = ClaudeCacheAnalysis(
-      hitRate: denominator > 0 ? cacheRead / denominator * 100 : nil
+      hitRate: denominator > 0 ? cacheRead / denominator * 100 : nil,
+      tokenEvents: tokenEvents
     )
     lastAnalysisDate = Date()
     isDirty = false
@@ -208,15 +231,33 @@ actor ClaudeCacheAnalyzer {
       }
       return UsageRecord(
         uuid: object["uuid"] as? String,
+        timestamp: date(object["timestamp"]),
         cacheRead: number(
           usage["cache_read_input_tokens"] ?? usage["cacheReadInputTokens"]
         ),
         cacheCreation: number(
           usage["cache_creation_input_tokens"] ?? usage["cacheCreationInputTokens"]
         ),
-        input: number(usage["input_tokens"] ?? usage["inputTokens"])
+        input: number(usage["input_tokens"] ?? usage["inputTokens"]),
+        output: number(usage["output_tokens"] ?? usage["outputTokens"])
       )
     }
+  }
+
+  // ponytail: ISO8601DateFormatter parsing is thread-safe in practice; unsafe-static
+  // avoids re-creating it per record without an actor hop.
+  nonisolated(unsafe) private static let isoFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
+
+  nonisolated(unsafe) private static let isoFormatterNoFraction = ISO8601DateFormatter()
+
+  nonisolated private static func date(_ value: Any?) -> Date? {
+    guard let string = value as? String else { return nil }
+    return isoFormatter.date(from: string)
+      ?? isoFormatterNoFraction.date(from: string)
   }
 
   nonisolated private static func number(_ value: Any?) -> Double {

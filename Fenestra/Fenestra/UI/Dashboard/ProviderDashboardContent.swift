@@ -4,6 +4,7 @@ struct ProviderDashboardContent: View {
   let snapshot: UsageSnapshot
   let errorMessage: String?
   let store: FenestraStore
+  let onContentHeightChange: (CGFloat) -> Void
 
   var body: some View {
     ScrollView {
@@ -20,6 +21,11 @@ struct ProviderDashboardContent: View {
         SnapshotDetails(snapshot: snapshot)
       }
       .padding(14)
+      .onGeometryChange(for: CGFloat.self) { proxy in
+        proxy.size.height
+      } action: { height in
+        onContentHeightChange(height)
+      }
     }
     .scrollEdgeEffectStyle(.soft, for: .top)
   }
@@ -29,15 +35,16 @@ private struct FreshnessLine: View {
   let snapshot: UsageSnapshot
 
   var body: some View {
-    HStack(spacing: 4) {
-      Text("Updated")
-      Text(snapshot.freshness, style: .relative)
-      Text("·")
-      Text("Source: \(snapshot.sourceDescription)")
-      if let account = snapshot.accountDescription, !account.isEmpty {
+    VStack(alignment: .leading, spacing: 2) {
+      HStack(spacing: 4) {
+        Text("Updated")
+        Text(snapshot.freshness, style: .relative)
         Text("·")
-        Text(account)
-          .lineLimit(1)
+        Text("Source: \(snapshot.sourceDescription)")
+      }
+      if let plan = snapshot.planDescription, !plan.isEmpty {
+        Text(plan)
+          .lineLimit(2)
       }
     }
     .font(.caption)
@@ -68,8 +75,18 @@ private struct StandardPoolsView: View {
   let store: FenestraStore
 
   var body: some View {
-    ForEach(snapshot.pools) { pool in
-      PoolColumn(snapshot: snapshot, pool: pool, store: store)
+    if snapshot.pools.allSatisfy({ $0.windows.isEmpty }) {
+      ContentUnavailableView {
+        Label("No percentage quota", systemImage: "gauge.open.with.lines.needle.33percent")
+      } description: {
+        Text("This provider returned account or balance information without a quota percentage.")
+      }
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 50)
+    } else {
+      ForEach(snapshot.pools) { pool in
+        PoolColumn(snapshot: snapshot, pool: pool, store: store)
+      }
     }
   }
 }
@@ -100,12 +117,12 @@ private struct PoolColumn: View {
           .font(.headline)
       }
       ForEach(pool.windows) { window in
-        WindowPanel(
+        HistoricalWindowBrowser(
           providerID: snapshot.providerID,
           pool: pool,
           window: window,
           freshness: snapshot.freshness,
-          history: store.historyPoints(
+          currentHistory: store.historyPoints(
             providerID: snapshot.providerID,
             poolID: pool.id,
             windowID: window.id,
@@ -116,7 +133,8 @@ private struct PoolColumn: View {
             pool: pool,
             window: window,
             at: snapshot.freshness
-          )
+          ),
+          historyStore: store.history
         )
       }
     }

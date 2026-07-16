@@ -17,8 +17,9 @@ struct AppSettingsTests {
     let settings = AppSettings(defaults: defaults)
     settings.load()
 
-    #expect(!settings.claudeEnabled)
-    #expect(settings.codexCadence == .fiveMinutes)
+    #expect(!settings.isEnabled(.claudeCode))
+    #expect(settings.cadence(for: .claudeCode) == .fiveMinutes)
+    #expect(settings.cadence(for: .codex) == .fiveMinutes)
     #expect(settings.badPaceThreshold == -75)
   }
 

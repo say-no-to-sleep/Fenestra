@@ -1,4 +1,5 @@
 import AppKit
+import CodexBarCore
 import Foundation
 import Observation
 
@@ -31,18 +32,21 @@ final class FenestraStore {
   private(set) var states: [ProviderID: ProviderDisplayState] = Dictionary(
     uniqueKeysWithValues: ProviderID.allCases.map { ($0, ProviderDisplayState()) }
   )
+  private(set) var healthSummaries: [ProviderID: ProviderHealthSummary] = [:]
   var selectedProvider: ProviderID = .claudeCode
 
   @ObservationIgnored private let notificationManager = NotificationManager()
   @ObservationIgnored private var providers: [ProviderID: any UsageProvider] = [:]
   @ObservationIgnored private var pollingTasks: [ProviderID: Task<Void, Never>] = [:]
   @ObservationIgnored private var activeRefreshes: Set<ProviderID> = []
-  @ObservationIgnored private var pendingRefreshes: Set<ProviderID> = []
+  @ObservationIgnored private var pendingRefreshes: [ProviderID: Bool] = [:]
   @ObservationIgnored private var wakeTask: Task<Void, Never>?
   @ObservationIgnored private var settingsChangeTask: Task<Void, Never>?
   @ObservationIgnored private var claudeProjectsWatcher: ClaudeProjectsWatcher?
   @ObservationIgnored private var hasStarted = false
   @ObservationIgnored private var userSelectedProvider = false
+  @ObservationIgnored private var personalizedPredictions: [String: ExhaustionPrediction] = [:]
+  @ObservationIgnored private var anomalyDetector = AnomalyDetector()
 
   func start() async {
     guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
@@ -52,7 +56,7 @@ final class FenestraStore {
     hasStarted = true
 
     settings.load()
-    history.loadAndPrune()
+    await history.loadAndPrune()
     configureProviders()
     restartClaudeProjectsWatcher()
     settings.onChange = { [weak self] in
@@ -95,14 +99,14 @@ final class FenestraStore {
       return
     }
     guard activeRefreshes.insert(providerID).inserted else {
-      pendingRefreshes.insert(providerID)
+      pendingRefreshes[providerID] = (pendingRefreshes[providerID] ?? false) || force
       return
     }
     defer {
       activeRefreshes.remove(providerID)
-      if pendingRefreshes.remove(providerID) != nil {
+      if let pendingForce = pendingRefreshes.removeValue(forKey: providerID) {
         Task { [weak self] in
-          await self?.refresh(providerID, force: force)
+          await self?.refresh(providerID, force: pendingForce)
         }
       }
     }
@@ -117,17 +121,42 @@ final class FenestraStore {
     }
     states[providerID] = state
 
+    let refreshStarted = Date()
     do {
-      let snapshot = try await provider.currentSnapshot()
-      history.append(snapshot)
+      let interaction: ProviderInteraction = force ? .userInitiated : .background
+      let snapshot = try await ProviderInteractionContext.$current.withValue(interaction) {
+        try await provider.currentSnapshot()
+      }
+      await history.append(snapshot)
+      await updatePersonalizedPredictions(snapshot: snapshot)
       states[providerID] = ProviderDisplayState(
         snapshot: snapshot,
         availability: .available
       )
+      let anomalies = anomalyDetector.evaluate(
+        snapshot: snapshot,
+        history: history.points,
+        refreshCadence: settings.cadence(for: providerID).duration ?? 5 * 60
+      )
+      await history.saveAnomalies(anomalies)
+      await history.recordRefresh(
+        ProviderRefreshEvent(
+          id: UUID(),
+          providerID: providerID,
+          timestamp: snapshot.freshness,
+          duration: Date().timeIntervalSince(refreshStarted),
+          source: snapshot.sourceDescription,
+          succeeded: true,
+          failureCategory: nil,
+          staleDuration: 0
+        )
+      )
+      await updateHealth(providerID: providerID)
       await notificationManager.evaluate(
         snapshot: snapshot,
         history: history,
-        settings: settings
+        settings: settings,
+        predictions: personalizedPredictions
       )
     } catch {
       let message =
@@ -138,6 +167,28 @@ final class FenestraStore {
         snapshot: state.snapshot,
         availability: .unavailable(message)
       )
+      let staleDuration = state.snapshot.map {
+        max(0, Date().timeIntervalSince($0.freshness))
+      } ?? 0
+      await history.recordRefresh(
+        ProviderRefreshEvent(
+          id: UUID(),
+          providerID: providerID,
+          timestamp: Date(),
+          duration: Date().timeIntervalSince(refreshStarted),
+          source: state.snapshot?.sourceDescription,
+          succeeded: false,
+          failureCategory: Self.failureCategory(error),
+          staleDuration: staleDuration
+        )
+      )
+      let anomalies = anomalyDetector.recordFailure(
+        providerID: providerID,
+        at: Date(),
+        staleDuration: staleDuration
+      )
+      await history.saveAnomalies(anomalies)
+      await updateHealth(providerID: providerID)
     }
     chooseUrgentProviderIfNeeded()
   }
@@ -193,20 +244,7 @@ final class FenestraStore {
 
   func authorizeCursorBrowserAccess() async {
     states[.cursor] = ProviderDisplayState(availability: .loading)
-    do {
-      guard let cursor = providers[.cursor] as? CursorProvider else {
-        throw ProviderFailure.unavailable("Cursor: provider unavailable")
-      }
-      try cursor.authorizeBrowserKeychainAccess()
-      await refresh(.cursor)
-    } catch {
-      let message =
-        (error as? LocalizedError)?.errorDescription
-        ?? error.localizedDescription
-      states[.cursor] = ProviderDisplayState(
-        availability: .unavailable(message)
-      )
-    }
+    await refresh(.cursor, force: true)
   }
 
   func paceEvaluation(
@@ -219,9 +257,68 @@ final class FenestraStore {
       providerID: providerID,
       poolID: pool.id,
       windowID: window.id,
-      now: date
+      now: date,
+      lookback: 2 * 60 * 60
     )
-    return PaceCalculator.evaluate(window: window, at: date, recentHistory: recent)
+    guard let baseline = PaceCalculator.evaluate(window: window, at: date, recentHistory: recent)
+    else { return nil }
+    let prediction = personalizedPredictions[
+      predictionKey(providerID: providerID, poolID: pool.id, windowID: window.id)
+    ] ?? baseline.exhaustionPrediction
+    return PaceEvaluation(
+      idealRemaining: baseline.idealRemaining,
+      delta: baseline.delta,
+      exhaustionPrediction: prediction
+    )
+  }
+
+  var urgentQuota: UrgentQuotaSummary? {
+    let candidates = settings.enabledProviders.flatMap { providerID -> [UrgentQuotaSummary] in
+      guard let snapshot = states[providerID]?.snapshot else { return [] }
+      return snapshot.pools.flatMap { pool in
+        pool.windows.map { window in
+          let evaluation = paceEvaluation(
+            providerID: providerID,
+            pool: pool,
+            window: window,
+            at: snapshot.freshness
+          )
+          return UrgentQuotaSummary(
+            providerID: providerID,
+            poolName: pool.name,
+            windowName: window.label,
+            remainingPercent: window.remainingPercent,
+            paceDelta: evaluation?.delta,
+            prediction: evaluation?.exhaustionPrediction,
+            reset: window.windowEnd
+          )
+        }
+      }
+    }
+    return candidates.max { urgencyScore($0) < urgencyScore($1) }
+  }
+
+  var resetTimeline: [ResetTimelineItem] {
+    settings.enabledProviders.flatMap { providerID -> [ResetTimelineItem] in
+      guard let snapshot = states[providerID]?.snapshot else { return [] }
+      return snapshot.pools.flatMap { pool in
+        pool.windows.map {
+          ResetTimelineItem(
+            providerID: providerID,
+            poolName: pool.name,
+            windowName: $0.label,
+            reset: $0.windowEnd
+          )
+        }
+      }
+    }.sorted {
+      switch ($0.reset, $1.reset) {
+      case (.some(let lhs), .some(let rhs)): lhs < rhs
+      case (.some, .none): true
+      case (.none, .some): false
+      case (.none, .none): $0.providerID.displayName < $1.providerID.displayName
+      }
+    }
   }
 
   var urgency: PaceUrgency {
@@ -257,6 +354,74 @@ final class FenestraStore {
     )
   }
 
+  func startNewUsageProfile() async {
+    await history.startNewProfile(providerID: selectedProvider)
+    if let snapshot = states[selectedProvider]?.snapshot {
+      await history.append(snapshot)
+      await updatePersonalizedPredictions(snapshot: snapshot)
+      await updateHealth(providerID: selectedProvider)
+    }
+  }
+
+  func clearLearnedAndHistoryData() async {
+    await history.clearAll()
+    personalizedPredictions = [:]
+    healthSummaries = [:]
+  }
+
+  func privacySafeDiagnosticsJSON() async -> Data {
+    let payload = await history.exportPayload()
+    let providers: [[String: Any]] = ProviderID.allCases.map { providerID in
+      let health = healthSummaries[providerID]
+      return [
+        "provider": providerID.rawValue,
+        "enabled": settings.isEnabled(providerID),
+        "cadenceSeconds": settings.cadence(for: providerID).rawValue,
+        "configuredSource": settings.connectionConfiguration(for: providerID).source.rawValue,
+        "currentState": availabilityLabel(states[providerID]?.availability ?? .idle),
+        "source": states[providerID]?.snapshot?.sourceDescription ?? NSNull(),
+        "lastSuccess": health?.lastSuccess?.timeIntervalSince1970 ?? NSNull(),
+        "sevenDaySuccessRate": health?.sevenDaySuccessRate ?? NSNull(),
+        "medianRefreshLatency": health?.medianRefreshLatency ?? NSNull(),
+        "staleDuration": health?.staleDuration ?? 0,
+      ]
+    }
+    let predictionEvidence: [[String: Any]] = personalizedPredictions.map { key, prediction in
+      [
+        "series": key,
+        "method": prediction.method.rawValue,
+        "confidence": prediction.confidence.rawValue,
+        "evidenceCount": prediction.evidenceCount,
+        "validationErrorSeconds": prediction.validationError ?? NSNull(),
+        "notificationEligible": prediction.notificationEligible,
+      ]
+    }
+    let failures = payload?.refreshEvents.compactMap(\.failureCategory?.rawValue) ?? []
+    let object: [String: Any] = [
+      "generatedAt": ISO8601DateFormatter().string(from: Date()),
+      "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
+      "osVersion": ProcessInfo.processInfo.operatingSystemVersionString,
+      "databaseAvailable": history.databaseAvailable,
+      "providers": providers,
+      "predictionEvidence": predictionEvidence,
+      "refreshFailureCategories": Dictionary(grouping: failures, by: { $0 }).mapValues(\.count),
+      "activeAnomalies": history.activeAnomalies.map {
+        ["provider": $0.providerID.rawValue, "kind": $0.kind.rawValue, "detail": $0.detail]
+      },
+    ]
+    return (try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]))
+      ?? Data("{}".utf8)
+  }
+
+  private func availabilityLabel(_ availability: ProviderAvailability) -> String {
+    switch availability {
+    case .idle: "waiting"
+    case .loading: "refreshing"
+    case .available: "connected"
+    case .unavailable: "unavailable"
+    }
+  }
+
   private func settingsDidChange() {
     settingsChangeTask?.cancel()
     settingsChangeTask = Task { [weak self] in
@@ -283,25 +448,19 @@ final class FenestraStore {
   }
 
   private func configureProviders() {
-    let claude = (providers[.claudeCode] as? ClaudeCodeProvider) ?? ClaudeCodeProvider()
-    claude.manualWeeklyReset = settings.manualClaudeWeeklyReset
-    claude.cacheAnalysisInterval = settings.claudeCachePollCadence.duration
-
-    let codex = (providers[.codex] as? CodexProvider) ?? CodexProvider()
-
-    let antigravity =
-      (providers[.antigravity] as? AntigravityProvider)
-      ?? AntigravityProvider()
-
-    let cursor = (providers[.cursor] as? CursorProvider) ?? CursorProvider()
-    cursor.allowBrowserKeychainAccess = settings.cursorBrowserAccessEnabled
-
-    providers = [
-      .claudeCode: claude,
-      .codex: codex,
-      .antigravity: antigravity,
-      .cursor: cursor,
-    ]
+    var configured: [ProviderID: any UsageProvider] = [:]
+    for providerID in ProviderID.allCases {
+      let provider =
+        (providers[providerID] as? CodexBarProvider)
+        ?? CodexBarProvider(id: providerID)
+      provider.connectionConfiguration = settings.connectionConfiguration(for: providerID)
+      if providerID == .claudeCode {
+        provider.manualWeeklyReset = settings.manualClaudeWeeklyReset
+        provider.cacheAnalysisInterval = settings.claudeCachePollCadence.duration
+      }
+      configured[providerID] = provider
+    }
+    providers = configured
   }
 
   private func restartPolling() {
@@ -324,7 +483,7 @@ final class FenestraStore {
   private func restartClaudeProjectsWatcher() {
     claudeProjectsWatcher?.stop()
     claudeProjectsWatcher = nil
-    guard settings.claudeEnabled else { return }
+    guard settings.isEnabled(.claudeCode) else { return }
     let projectsURL = FileManager.default.homeDirectoryForCurrentUser
       .appending(path: ".claude/projects")
     let watcher = ClaudeProjectsWatcher(
@@ -332,8 +491,13 @@ final class FenestraStore {
       backstopInterval: settings.claudeCachePollCadence.duration
     ) { [weak self] in
       Task { @MainActor in
-        await ClaudeCacheAnalyzer.shared.markDirty(projectsURL: projectsURL)
-        await self?.refresh(.claudeCode)
+        guard let self,
+          let provider = self.providers[.claudeCode] as? CodexBarProvider
+        else {
+          return
+        }
+        let hitRate = await provider.refreshCacheAnalysis()
+        self.updateClaudeCacheHitRate(hitRate)
       }
     }
     claudeProjectsWatcher = watcher
@@ -380,17 +544,145 @@ final class FenestraStore {
     }
   }
 
+  private func updatePersonalizedPredictions(snapshot: UsageSnapshot) async {
+    for pool in snapshot.pools {
+      for window in pool.windows {
+        let recent = history.recentPoints(
+          providerID: snapshot.providerID,
+          poolID: pool.id,
+          windowID: window.id,
+          now: snapshot.freshness,
+          lookback: 2 * 60 * 60
+        )
+        let baseline = PaceCalculator.exhaustionPrediction(
+          remainingPercent: window.remainingPercent,
+          now: snapshot.freshness,
+          recentHistory: recent
+        )
+        let key = predictionKey(
+          providerID: snapshot.providerID,
+          poolID: pool.id,
+          windowID: window.id
+        )
+        guard settings.personalizedForecastingEnabled else {
+          personalizedPredictions[key] = baseline
+          continue
+        }
+        let comparable = await history.comparableWindows(
+          providerID: snapshot.providerID,
+          poolID: pool.id,
+          windowID: window.id
+        )
+        personalizedPredictions[key] = PersonalizedForecaster.forecast(
+          baseline: baseline,
+          window: window,
+          now: snapshot.freshness,
+          histories: comparable,
+          returningPlanNeedsValidation:
+            history.activeRegimes[snapshot.providerID]?.returningPlanNeedsValidation ?? false
+        )
+      }
+    }
+  }
+
+  private func updateHealth(providerID: ProviderID) async {
+    let snapshot = states[providerID]?.snapshot
+    healthSummaries[providerID] = await history.healthSummary(
+      providerID: providerID,
+      source: snapshot?.sourceDescription,
+      staleDuration: snapshot.map { max(0, Date().timeIntervalSince($0.freshness)) } ?? 0
+    )
+  }
+
+  private func predictionKey(providerID: ProviderID, poolID: String, windowID: String) -> String {
+    "\(providerID.rawValue)|\(poolID)|\(windowID)"
+  }
+
+  private func urgencyScore(_ quota: UrgentQuotaSummary) -> Double {
+    let validatedRisk: Double
+    if let prediction = quota.prediction,
+      prediction.notificationEligible,
+      let reset = quota.reset,
+      let likely = prediction.likely,
+      likely < reset
+    {
+      validatedRisk = 10_000 + (prediction.exhaustionProbability ?? 1) * 1_000
+    } else {
+      validatedRisk = 0
+    }
+    return validatedRisk + max(0, -(quota.paceDelta ?? 0)) * 10 + (100 - quota.remainingPercent)
+  }
+
+  private static func failureCategory(_ error: Error) -> RefreshFailureCategory {
+    let message = error.localizedDescription.lowercased()
+    if message.contains("auth") || message.contains("keychain") || message.contains("credential") {
+      return .authentication
+    }
+    if message.contains("rate") || message.contains("429") { return .rateLimited }
+    if message.contains("network") || message.contains("offline") || message.contains("timed out") {
+      return .network
+    }
+    if message.contains("parse") || message.contains("decode") { return .parsing }
+    if message.contains("unavailable") { return .unavailable }
+    return .unknown
+  }
+
+  private func updateClaudeCacheHitRate(_ hitRate: Double?) {
+    guard var state = states[.claudeCode],
+      let snapshot = state.snapshot,
+      snapshot.cacheHitRate != hitRate
+    else {
+      return
+    }
+    state.snapshot = UsageSnapshot(
+      providerID: snapshot.providerID,
+      displayName: snapshot.displayName,
+      pools: snapshot.pools,
+      freshness: snapshot.freshness,
+      sourceDescription: snapshot.sourceDescription,
+      cacheHitRate: hitRate,
+      accountDescription: snapshot.accountDescription,
+      planDescription: snapshot.planDescription,
+      notes: snapshot.notes
+    )
+    states[.claudeCode] = state
+  }
+
   private func invalidateProviderCaches(for providerID: ProviderID) {
     switch providerID {
     case .antigravity:
       AntigravityCloudFallback.invalidateCachedToken()
     case .claudeCode:
       KeychainReader.invalidate(service: "Claude Code-credentials")
+      ClaudeUsageRateLimitGate().allowManualRetry()
     case .cursor:
       KeychainReader.invalidate(service: "Chrome Safe Storage")
       KeychainReader.invalidate(service: "Microsoft Edge Safe Storage")
     case .codex:
       break
+    default:
+      break
     }
   }
+
+  #if DEBUG
+    static func preview(
+      selectedProvider: ProviderID = .codex,
+      state: ProviderDisplayState = ProviderDisplayState()
+    ) -> FenestraStore {
+      let store = FenestraStore()
+      store.hasStarted = true
+      store.selectedProvider = selectedProvider
+      store.states[selectedProvider] = state
+      return store
+    }
+
+    static func emptyPreview() -> FenestraStore {
+      let store = preview()
+      for provider in ProviderID.allCases {
+        store.settings.setEnabled(false, for: provider)
+      }
+      return store
+    }
+  #endif
 }

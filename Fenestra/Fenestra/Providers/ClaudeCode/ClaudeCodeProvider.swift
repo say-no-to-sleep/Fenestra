@@ -8,8 +8,14 @@ final class ClaudeCodeProvider: UsageProvider {
   var manualWeeklyReset: Date?
   var cacheAnalysisInterval: TimeInterval?
 
+  private let rateLimitGate = ClaudeUsageRateLimitGate()
   private let projectsURL = FileManager.default.homeDirectoryForCurrentUser
     .appending(path: ".claude/projects")
+
+  func refreshCacheAnalysis() async -> Double? {
+    await ClaudeCacheAnalyzer.shared.markDirty(projectsURL: projectsURL)
+    return await ClaudeCacheAnalyzer.shared.analyze(projectsURL: projectsURL).hitRate
+  }
 
   func currentSnapshot() async throws -> UsageSnapshot {
     let statusline = ClaudeStatuslineReader.read()
@@ -66,6 +72,11 @@ final class ClaudeCodeProvider: UsageProvider {
   }
 
   private func fetchUsage(accessToken: String) async throws -> ClaudeUsageResponse {
+    if let blockedUntil = rateLimitGate.blockedUntil() {
+      throw ProviderFailure.unavailable(
+        ClaudeUsageRateLimitGate.message(blockedUntil: blockedUntil)
+      )
+    }
     guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
       throw ProviderFailure.invalidResponse("Claude: invalid usage endpoint")
     }
@@ -75,7 +86,8 @@ final class ClaudeCodeProvider: UsageProvider {
     request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
     request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
-    request.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue(await ClaudeCodeUserAgent.value(), forHTTPHeaderField: "User-Agent")
     let (data, response) = try await RestrictedHTTPClient.data(for: request)
     switch response.statusCode {
     case 200:
@@ -90,6 +102,7 @@ final class ClaudeCodeProvider: UsageProvider {
         else {
           throw ProviderFailure.invalidResponse("Claude: invalid usage values")
         }
+        rateLimitGate.recordSuccess()
         return usage
       } catch {
         if let failure = error as? ProviderFailure {
@@ -100,7 +113,11 @@ final class ClaudeCodeProvider: UsageProvider {
     case 401:
       throw ClaudeAPIError.unauthorized
     case 429:
-      throw ProviderFailure.unavailable("Claude: usage API rate limited")
+      let retryAfter = ClaudeUsageRateLimitGate.retryAfterDate(from: response)
+      let blockedUntil = rateLimitGate.recordRateLimit(retryAfter: retryAfter)
+      throw ProviderFailure.unavailable(
+        ClaudeUsageRateLimitGate.message(blockedUntil: blockedUntil)
+      )
     default:
       throw ProviderFailure.unavailable("Claude: usage API returned HTTP \(response.statusCode)")
     }

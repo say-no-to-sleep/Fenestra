@@ -10,7 +10,7 @@ struct FenestraApp: App {
       DashboardView(store: store)
         .environment(\.paceTheme, store.settings.paceTheme)
     } label: {
-      MenuBarGlyph(urgency: store.urgency)
+      MenuBarGlyph(urgency: store.urgency, quota: store.urgentQuota)
         .environment(\.paceTheme, store.settings.paceTheme)
         .task {
           await store.start()
@@ -41,17 +41,25 @@ struct FenestraApp: App {
 
 private struct MenuBarGlyph: View {
   let urgency: PaceUrgency
+  let quota: UrgentQuotaSummary?
   @Environment(\.paceTheme) private var paceTheme
 
   var body: some View {
-    Image(systemName: symbol)
-      .symbolRenderingMode(.monochrome)
-      .foregroundStyle(paceTheme.urgencyColor(urgency))
-      .accessibilityLabel(accessibilityText)
+    HStack(spacing: 4) {
+      Image(systemName: symbol)
+        .symbolRenderingMode(.monochrome)
+        .foregroundStyle(paceTheme.urgencyColor(urgency))
+      if let quota {
+        Text("\(quota.providerID.displayName) \(quota.remainingPercent.formatted(.number.precision(.fractionLength(0))))%")
+          .monospacedDigit()
+      }
+    }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(accessibilityText)
   }
 
   private var symbol: String {
-    switch urgency {
+    return switch urgency {
     case .unknown: "gauge.with.dots.needle.0percent"
     case .good: "gauge.with.dots.needle.33percent"
     case .warning: "gauge.with.dots.needle.67percent"
@@ -60,7 +68,14 @@ private struct MenuBarGlyph: View {
   }
 
   private var accessibilityText: String {
-    switch urgency {
+    if let quota {
+      var value = "Fenestra. Most urgent: \(quota.providerID.displayName) \(quota.windowName), \(quota.remainingPercent.formatted(.number.precision(.fractionLength(0)))) percent remaining"
+      if let delta = quota.paceDelta {
+        value += delta < 0 ? ", \(abs(delta).rounded().formatted()) percent over pace" : ", on pace"
+      }
+      return value
+    }
+    return switch urgency {
     case .unknown: "Fenestra, pace unknown"
     case .good: "Fenestra, pace good"
     case .warning: "Fenestra, pace warning"

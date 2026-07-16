@@ -7,21 +7,22 @@ import Testing
 @MainActor
 struct HistoryStoreTests {
   @Test
-  func coalescesSmallFrequentSamplesButKeepsSignificantChanges() {
-    let fileURL = FileManager.default.temporaryDirectory
-      .appending(path: "fenestra-history-\(UUID().uuidString).json")
-    defer { try? FileManager.default.removeItem(at: fileURL) }
+  func coalescesSmallFrequentSamplesButKeepsSignificantChanges() async {
+    let directory = FileManager.default.temporaryDirectory
+      .appending(path: "fenestra-history-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let fileURL = directory.appending(path: "history.json")
+    defer { try? FileManager.default.removeItem(at: directory) }
 
     let store = HistoryStore(fileURL: fileURL)
     let start = Date(timeIntervalSince1970: 1_800_000_000)
-    store.append(snapshot(at: start, remaining: 90))
-    store.append(snapshot(at: start.addingTimeInterval(60), remaining: 89.5))
+    await store.append(snapshot(at: start, remaining: 90))
+    await store.append(snapshot(at: start.addingTimeInterval(60), remaining: 89.5))
     #expect(store.points.count == 1)
 
-    store.append(snapshot(at: start.addingTimeInterval(120), remaining: 88.5))
+    await store.append(snapshot(at: start.addingTimeInterval(120), remaining: 88.5))
     #expect(store.points.count == 2)
 
-    store.append(snapshot(at: start.addingTimeInterval(12 * 60), remaining: 88.4))
+    await store.append(snapshot(at: start.addingTimeInterval(12 * 60), remaining: 88.4))
     #expect(store.points.count == 3)
   }
 

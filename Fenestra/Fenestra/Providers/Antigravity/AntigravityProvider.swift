@@ -285,6 +285,7 @@ final class AntigravityProvider: UsageProvider {
       cacheHitRate: nil,
       accountDescription: [identity?.email, identity?.plan].compactMap(\.self)
         .joined(separator: " · "),
+      planDescription: identity?.plan,
       notes: timelineNotes(for: pools)
     )
   }

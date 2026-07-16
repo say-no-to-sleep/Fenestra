@@ -77,6 +77,7 @@ final class CodexProvider: UsageProvider {
       sourceDescription: "Codex CLI usage API",
       cacheHitRate: nil,
       accountDescription: payload.planType,
+      planDescription: payload.planType,
       notes: notes
     )
   }

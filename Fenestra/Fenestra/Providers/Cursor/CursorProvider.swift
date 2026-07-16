@@ -139,56 +139,14 @@ final class CursorProvider: UsageProvider {
       breakdown: breakdown
     )
 
-    // Cursor's included usage is composed of independent sub-meters (e.g. API
-    // and Auto+Composer) that each progress against the same monthly allowance.
-    // Surface them as separate monthly windows so each gets its own pace graph
-    // rather than collapsing to a single Total chart with breakdown bars.
-    let apiPercent = componentPercent(from: breakdown, ids: ["api"])
-    let autoPercent = componentPercent(from: breakdown, ids: ["auto", "composer"])
-
-    var windows: [UsageWindowSnapshot] = []
-    if let apiPercent {
-      windows.append(
-        componentWindow(
-          id: "cursor-api",
-          label: "API",
-          start: billing.start,
-          end: billing.end,
-          quotaTotal: meter.quotaTotal,
-          usedPercent: apiPercent
-        ))
-    }
-    if let autoPercent {
-      windows.append(
-        componentWindow(
-          id: "cursor-auto",
-          label: "Auto",
-          start: billing.start,
-          end: billing.end,
-          quotaTotal: meter.quotaTotal,
-          usedPercent: autoPercent
-        ))
-    }
-
-    // Fallback when the response doesn't expose per-component meters: show the
-    // overall Total as a single monthly window with the breakdown bars.
-    if windows.isEmpty {
-      windows.append(
-        UsageWindowSnapshot(
-          id: "cursor-monthly-v2",
-          kind: .monthly,
-          label: "Monthly",
-          windowStart: billing.start,
-          windowEnd: billing.end,
-          quotaTotal: meter.quotaTotal,
-          used: meter.used,
-          remainingPercent: max(0, 100 - meter.totalPercent),
-          resetSource: billing.end == nil ? nil : "Cursor billing data",
-          breakdown: breakdown.filter {
-            $0.id.caseInsensitiveCompare("total") != .orderedSame
-          }
-        ))
-    }
+    let windows = [
+      CursorUsageResolver.monthlyWindow(
+        usage: meter,
+        start: billing.start,
+        end: billing.end,
+        breakdown: breakdown
+      )
+    ]
 
     var notes = [meter.unitNote]
     if !windows.contains(where: \.hasKnownTimeline) {
@@ -203,42 +161,8 @@ final class CursorProvider: UsageProvider {
       cacheHitRate: nil,
       accountDescription: [user?.email, summary.membershipType].compactMap(\.self)
         .joined(separator: " · "),
+      planDescription: summary.membershipType,
       notes: notes
-    )
-  }
-
-  private func componentPercent(
-    from breakdown: [UsageBreakdownItem],
-    ids: [String]
-  ) -> Double? {
-    let lowercased = Set(ids.map { $0.lowercased() })
-    let matches = breakdown.filter { lowercased.contains($0.id.lowercased()) }
-    guard !matches.isEmpty else { return nil }
-    // Auto and Composer share a single sub-pool with shared overflow, so the
-    // combined meter is represented by the furthest-progressed component.
-    return matches.map(\.usedPercent).max()
-  }
-
-  private func componentWindow(
-    id: String,
-    label: String,
-    start: Date?,
-    end: Date?,
-    quotaTotal: Double,
-    usedPercent: Double
-  ) -> UsageWindowSnapshot {
-    let used = quotaTotal > 0 ? quotaTotal * usedPercent / 100 : usedPercent
-    return UsageWindowSnapshot(
-      id: id,
-      kind: .monthly,
-      label: label,
-      windowStart: start,
-      windowEnd: end,
-      quotaTotal: quotaTotal,
-      used: used,
-      remainingPercent: max(0, 100 - usedPercent),
-      resetSource: end == nil ? nil : "Cursor billing data",
-      breakdown: []
     )
   }
 

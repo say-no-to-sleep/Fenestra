@@ -1,9 +1,44 @@
 import Foundation
 import UserNotifications
 
+enum ExhaustionAlertKind: Equatable {
+  case none
+  case possible
+  case likely
+
+  static func classify(prediction: ExhaustionPrediction?, reset: Date?) -> Self {
+    guard let prediction, prediction.hasRange,
+      let earliest = prediction.earliest,
+      let likely = prediction.likely,
+      let reset,
+      earliest < reset
+    else { return .none }
+    return likely < reset ? .likely : .possible
+  }
+}
+
+struct ExhaustionWarningGate {
+  private var counts: [String: Int] = [:]
+
+  mutating func shouldDeliver(key: String, kind: ExhaustionAlertKind) -> Bool {
+    switch kind {
+    case .none:
+      counts[key] = 0
+      return false
+    case .likely:
+      counts[key] = 0
+      return true
+    case .possible:
+      counts[key, default: 0] += 1
+      return counts[key, default: 0] >= 2
+    }
+  }
+}
+
 @MainActor
 final class NotificationManager {
   private var badPaceCounts: [String: Int] = [:]
+  private var exhaustionWarningGate = ExhaustionWarningGate()
   private var deliveredConditions: Set<String> = []
 
   func requestAuthorizationIfNeeded() async {
@@ -20,7 +55,8 @@ final class NotificationManager {
   func evaluate(
     snapshot: UsageSnapshot,
     history: HistoryStore,
-    settings: AppSettings
+    settings: AppSettings,
+    predictions: [String: ExhaustionPrediction] = [:]
   ) async {
     guard settings.notificationsEnabled else { return }
     let center = UNUserNotificationCenter.current()
@@ -39,13 +75,22 @@ final class NotificationManager {
           providerID: snapshot.providerID,
           poolID: pool.id,
           windowID: window.id,
-          now: snapshot.freshness
+          now: snapshot.freshness,
+          lookback: 2 * 60 * 60
         )
-        let evaluation = PaceCalculator.evaluate(
+        var evaluation = PaceCalculator.evaluate(
           window: window,
           at: snapshot.freshness,
           recentHistory: recent
         )
+        let predictionKey = "\(snapshot.providerID.rawValue)|\(pool.id)|\(window.id)"
+        if let prediction = predictions[predictionKey], let base = evaluation {
+          evaluation = PaceEvaluation(
+            idealRemaining: base.idealRemaining,
+            delta: base.delta,
+            exhaustionPrediction: prediction
+          )
+        }
         if let evaluation {
           await evaluateBadPace(
             key: key,
@@ -68,6 +113,34 @@ final class NotificationManager {
           timeSensitiveAllowed: notificationSettings.timeSensitiveSetting == .enabled,
           center: center
         )
+      }
+    }
+    if settings.anomalyNotificationsEnabled {
+      await evaluateAnomalies(
+        history.activeAnomalies.filter { $0.providerID == snapshot.providerID },
+        center: center
+      )
+    }
+  }
+
+  private func evaluateAnomalies(
+    _ anomalies: [UsageAnomaly],
+    center: UNUserNotificationCenter
+  ) async {
+    let activeKeys = Set(anomalies.map { "anomaly.\($0.id.uuidString)" })
+    deliveredConditions = deliveredConditions.filter {
+      !$0.hasPrefix("anomaly.") || activeKeys.contains($0)
+    }
+    for anomaly in anomalies where anomaly.alertable && anomaly.confirmedAt != nil {
+      let key = "anomaly.\(anomaly.id.uuidString)"
+      guard !deliveredConditions.contains(key) else { continue }
+      let content = UNMutableNotificationContent()
+      content.title = "\(anomaly.providerID.displayName): \(anomaly.kind.title)"
+      content.body = anomaly.detail
+      content.sound = .default
+      content.interruptionLevel = .active
+      if await add(content, identifier: key, center: center) {
+        deliveredConditions.insert(key)
       }
     }
   }
@@ -134,27 +207,51 @@ final class NotificationManager {
     }
 
     deliveredConditions.remove(exhaustedKey)
-    guard let exhaustion = evaluation?.projectedExhaustion,
-      let reset = window.windowEnd,
-      exhaustion < reset
+    guard let prediction = evaluation?.exhaustionPrediction,
+      prediction.notificationEligible,
+      prediction.hasRange,
+      let earliest = prediction.earliest,
+      let latest = prediction.latest,
+      let reset = window.windowEnd
     else {
+      _ = exhaustionWarningGate.shouldDeliver(key: key, kind: .none)
       deliveredConditions.remove(conditionKey)
       return
     }
+    let kind = ExhaustionAlertKind.classify(prediction: prediction, reset: reset)
+    guard kind != .none else {
+      _ = exhaustionWarningGate.shouldDeliver(key: key, kind: .none)
+      deliveredConditions.remove(conditionKey)
+      return
+    }
+    guard exhaustionWarningGate.shouldDeliver(key: key, kind: kind) else { return }
+    let likelyBeforeReset = kind == .likely
     guard !deliveredConditions.contains(conditionKey) else { return }
 
     let content = UNMutableNotificationContent()
-    content.title = "\(providerName) may run out"
-    let time = exhaustion.formatted(date: .omitted, time: .shortened)
+    content.title = likelyBeforeReset
+      ? "\(providerName) likely to run out"
+      : "\(providerName) may run out"
+    let range = Self.predictionRange(earliest: earliest, latest: latest)
     content.body =
       poolName == "Default"
-      ? "Projected \(time), before reset"
-      : "\(poolName): projected \(time), before reset"
+      ? "Projected \(range), before reset"
+      : "\(poolName): projected \(range), before reset"
     content.sound = .default
-    content.interruptionLevel = timeSensitiveAllowed ? .timeSensitive : .active
+    content.interruptionLevel =
+      likelyBeforeReset && timeSensitiveAllowed ? .timeSensitive : .active
     if await add(content, identifier: conditionKey, center: center) {
       deliveredConditions.insert(conditionKey)
     }
+  }
+
+  private static func predictionRange(earliest: Date, latest: Date) -> String {
+    let calendar = Calendar.autoupdatingCurrent
+    let first = earliest.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    let last = calendar.isDate(earliest, inSameDayAs: latest)
+      ? latest.formatted(date: .omitted, time: .shortened)
+      : latest.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    return "\(first)–\(last)"
   }
 
   private func add(

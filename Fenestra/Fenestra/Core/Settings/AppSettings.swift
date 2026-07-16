@@ -30,17 +30,22 @@ enum RefreshCadence: Int, CaseIterable, Identifiable, Sendable {
 @Observable
 @MainActor
 final class AppSettings {
-  var claudeEnabled = true { didSet { changed() } }
-  var codexEnabled = true { didSet { changed() } }
-  var antigravityEnabled = true { didSet { changed() } }
-  var cursorEnabled = true { didSet { changed() } }
-
-  var claudeCadence: RefreshCadence = .fortyFiveSeconds { didSet { changed() } }
-  var codexCadence: RefreshCadence = .fortyFiveSeconds { didSet { changed() } }
-  var antigravityCadence: RefreshCadence = .oneMinute { didSet { changed() } }
-  var cursorCadence: RefreshCadence = .oneMinute { didSet { changed() } }
+  private(set) var providerEnabled = Dictionary(
+    uniqueKeysWithValues: ProviderID.allCases.map {
+      ($0, AppSettings.defaultEnabled(for: $0))
+    }
+  )
+  private(set) var providerCadences = Dictionary(
+    uniqueKeysWithValues: ProviderID.allCases.map {
+      ($0, AppSettings.defaultCadence(for: $0))
+    }
+  )
+  private(set) var providerConnections = Dictionary(
+    uniqueKeysWithValues: ProviderID.allCases.map {
+      ($0, ProviderConnectionConfiguration())
+    }
+  )
   var claudeCachePollCadence: RefreshCadence = .fiveMinutes { didSet { changed() } }
-  var cursorBrowserAccessEnabled = false { didSet { changed() } }
 
   var useClaudeWeeklyResetOverride = false {
     didSet {
@@ -54,40 +59,68 @@ final class AppSettings {
     didSet { changed() }
   }
   var notificationsEnabled = true { didSet { changed() } }
+  var anomalyNotificationsEnabled = true { didSet { changed() } }
   var badPaceThreshold = -25.0 { didSet { changed() } }
   var launchAtLogin = false { didSet { changed() } }
   var paceThemeStyle: PaceThemeStyle = .classic { didSet { changed() } }
+  var expandedPopover = true { didSet { changed() } }
+  var personalizedForecastingEnabled = true { didSet { changed() } }
 
   var paceTheme: PaceTheme {
     PaceTheme.palette(for: paceThemeStyle)
   }
 
+  var badPaceThresholdMagnitude: Double {
+    get { abs(badPaceThreshold) }
+    set { badPaceThreshold = -abs(newValue) }
+  }
+
   @ObservationIgnored private let defaults: UserDefaults
+  @ObservationIgnored private let secretStore: any ProviderSecretStoring
   @ObservationIgnored private var hasLoaded = false
   @ObservationIgnored var onChange: (() -> Void)?
 
-  init(defaults: UserDefaults = .standard) {
+  init(
+    defaults: UserDefaults = .standard,
+    secretStore: any ProviderSecretStoring = KeychainProviderSecretStore()
+  ) {
     self.defaults = defaults
+    self.secretStore = secretStore
   }
 
   func load() {
     guard !hasLoaded else { return }
 
-    claudeEnabled = defaults.object(forKey: Keys.claudeEnabled) as? Bool ?? true
-    codexEnabled = defaults.object(forKey: Keys.codexEnabled) as? Bool ?? true
-    antigravityEnabled = defaults.object(forKey: Keys.antigravityEnabled) as? Bool ?? true
-    cursorEnabled = defaults.object(forKey: Keys.cursorEnabled) as? Bool ?? true
-    claudeCadence = cadence(defaults, key: Keys.claudeCadence, fallback: .fortyFiveSeconds)
-    codexCadence = cadence(defaults, key: Keys.codexCadence, fallback: .fortyFiveSeconds)
-    antigravityCadence = cadence(defaults, key: Keys.antigravityCadence, fallback: .oneMinute)
-    cursorCadence = cadence(defaults, key: Keys.cursorCadence, fallback: .oneMinute)
+    providerEnabled = Dictionary(
+      uniqueKeysWithValues: ProviderID.allCases.map { providerID in
+        let key = providerKey(providerID, suffix: "enabled")
+        let value =
+          defaults.object(forKey: key) as? Bool
+          ?? Self.defaultEnabled(for: providerID)
+        return (providerID, value)
+      }
+    )
+    providerCadences = Dictionary(
+      uniqueKeysWithValues: ProviderID.allCases.map { providerID in
+        let key = providerKey(providerID, suffix: "cadence")
+        let value = cadence(
+          defaults,
+          key: key,
+          fallback: Self.defaultCadence(for: providerID)
+        )
+        return (providerID, value)
+      }
+    )
+    providerConnections = Dictionary(
+      uniqueKeysWithValues: ProviderID.allCases.map { providerID in
+        (providerID, loadConnectionConfiguration(for: providerID))
+      }
+    )
     claudeCachePollCadence = cadence(
       defaults,
       key: Keys.claudeCachePollCadence,
       fallback: .fiveMinutes
     )
-    cursorBrowserAccessEnabled =
-      defaults.object(forKey: Keys.cursorBrowserAccessEnabled) as? Bool ?? false
     useClaudeWeeklyResetOverride =
       defaults.object(forKey: Keys.useClaudeWeeklyResetOverride) as? Bool ?? false
     if let date = defaults.object(forKey: Keys.claudeWeeklyResetOverride) as? Date {
@@ -99,6 +132,8 @@ final class AppSettings {
       useClaudeWeeklyResetOverride = false
     }
     notificationsEnabled = defaults.object(forKey: Keys.notificationsEnabled) as? Bool ?? true
+    anomalyNotificationsEnabled =
+      defaults.object(forKey: Keys.anomalyNotificationsEnabled) as? Bool ?? true
     if defaults.object(forKey: Keys.badPaceThreshold) != nil {
       let storedThreshold = defaults.double(forKey: Keys.badPaceThreshold)
       if storedThreshold.isFinite {
@@ -114,6 +149,9 @@ final class AppSettings {
     {
       paceThemeStyle = style
     }
+    expandedPopover = defaults.object(forKey: Keys.expandedPopover) as? Bool ?? true
+    personalizedForecastingEnabled =
+      defaults.object(forKey: Keys.personalizedForecastingEnabled) as? Bool ?? true
     hasLoaded = true
   }
 
@@ -128,21 +166,57 @@ final class AppSettings {
   }
 
   func isEnabled(_ providerID: ProviderID) -> Bool {
-    switch providerID {
-    case .claudeCode: claudeEnabled
-    case .codex: codexEnabled
-    case .antigravity: antigravityEnabled
-    case .cursor: cursorEnabled
-    }
+    providerEnabled[providerID] ?? Self.defaultEnabled(for: providerID)
+  }
+
+  func setEnabled(_ enabled: Bool, for providerID: ProviderID) {
+    guard providerEnabled[providerID] != enabled else { return }
+    providerEnabled[providerID] = enabled
+    changed()
   }
 
   func cadence(for providerID: ProviderID) -> RefreshCadence {
-    switch providerID {
-    case .claudeCode: claudeCadence
-    case .codex: codexCadence
-    case .antigravity: antigravityCadence
-    case .cursor: cursorCadence
+    providerCadences[providerID] ?? Self.defaultCadence(for: providerID)
+  }
+
+  func setCadence(_ cadence: RefreshCadence, for providerID: ProviderID) {
+    guard providerCadences[providerID] != cadence else { return }
+    providerCadences[providerID] = cadence
+    changed()
+  }
+
+  func connectionConfiguration(
+    for providerID: ProviderID
+  ) -> ProviderConnectionConfiguration {
+    providerConnections[providerID] ?? ProviderConnectionConfiguration()
+  }
+
+  func setConnectionConfiguration(
+    _ configuration: ProviderConnectionConfiguration,
+    for providerID: ProviderID
+  ) throws {
+    var configuration = configuration
+    if !providerID.supportedDataSources.contains(configuration.source) {
+      configuration.source = .auto
     }
+    try secretStore.setValue(
+      configuration.apiKey,
+      provider: providerID,
+      field: .apiKey
+    )
+    try secretStore.setValue(
+      configuration.secretKey,
+      provider: providerID,
+      field: .secretKey
+    )
+    try secretStore.setValue(
+      configuration.cookieHeader,
+      provider: providerID,
+      field: .cookieHeader
+    )
+    guard providerConnections[providerID] != configuration else { return }
+    providerConnections[providerID] = configuration
+    changed()
   }
 
   var enabledProviders: [ProviderID] {
@@ -174,40 +248,133 @@ final class AppSettings {
   }
 
   private func save() {
-    defaults.set(claudeEnabled, forKey: Keys.claudeEnabled)
-    defaults.set(codexEnabled, forKey: Keys.codexEnabled)
-    defaults.set(antigravityEnabled, forKey: Keys.antigravityEnabled)
-    defaults.set(cursorEnabled, forKey: Keys.cursorEnabled)
-    defaults.set(claudeCadence.rawValue, forKey: Keys.claudeCadence)
-    defaults.set(codexCadence.rawValue, forKey: Keys.codexCadence)
-    defaults.set(antigravityCadence.rawValue, forKey: Keys.antigravityCadence)
-    defaults.set(cursorCadence.rawValue, forKey: Keys.cursorCadence)
+    for providerID in ProviderID.allCases {
+      defaults.set(
+        isEnabled(providerID),
+        forKey: providerKey(providerID, suffix: "enabled")
+      )
+      defaults.set(
+        cadence(for: providerID).rawValue,
+        forKey: providerKey(providerID, suffix: "cadence")
+      )
+      let connection = connectionConfiguration(for: providerID)
+      defaults.set(
+        connection.source.rawValue,
+        forKey: providerKey(providerID, suffix: "source")
+      )
+      defaults.set(
+        connection.cookieMode.rawValue,
+        forKey: providerKey(providerID, suffix: "cookieSource")
+      )
+      defaults.set(
+        connection.region,
+        forKey: providerKey(providerID, suffix: "region")
+      )
+      defaults.set(
+        connection.workspaceID,
+        forKey: providerKey(providerID, suffix: "workspaceID")
+      )
+      defaults.set(
+        connection.enterpriseHost,
+        forKey: providerKey(providerID, suffix: "enterpriseHost")
+      )
+      defaults.set(
+        connection.awsProfile,
+        forKey: providerKey(providerID, suffix: "awsProfile")
+      )
+      defaults.set(
+        connection.awsAuthMode,
+        forKey: providerKey(providerID, suffix: "awsAuthMode")
+      )
+    }
     defaults.set(claudeCachePollCadence.rawValue, forKey: Keys.claudeCachePollCadence)
-    defaults.set(cursorBrowserAccessEnabled, forKey: Keys.cursorBrowserAccessEnabled)
     defaults.set(useClaudeWeeklyResetOverride, forKey: Keys.useClaudeWeeklyResetOverride)
     defaults.set(claudeWeeklyResetOverride, forKey: Keys.claudeWeeklyResetOverride)
     defaults.set(notificationsEnabled, forKey: Keys.notificationsEnabled)
+    defaults.set(anomalyNotificationsEnabled, forKey: Keys.anomalyNotificationsEnabled)
     defaults.set(badPaceThreshold, forKey: Keys.badPaceThreshold)
     defaults.set(launchAtLogin, forKey: Keys.launchAtLogin)
     defaults.set(paceThemeStyle.rawValue, forKey: Keys.paceThemeStyle)
+    defaults.set(expandedPopover, forKey: Keys.expandedPopover)
+    defaults.set(personalizedForecastingEnabled, forKey: Keys.personalizedForecastingEnabled)
+  }
+
+  private func providerKey(_ providerID: ProviderID, suffix: String) -> String {
+    "providers.\(providerID.settingsKey).\(suffix)"
+  }
+
+  private func loadConnectionConfiguration(
+    for providerID: ProviderID
+  ) -> ProviderConnectionConfiguration {
+    var configuration = ProviderConnectionConfiguration()
+    if let raw = defaults.string(forKey: providerKey(providerID, suffix: "source")),
+      let source = ProviderDataSource(rawValue: raw),
+      providerID.supportedDataSources.contains(source)
+    {
+      configuration.source = source
+    }
+    if let raw = defaults.string(
+      forKey: providerKey(providerID, suffix: "cookieSource")
+    ),
+      let cookieMode = ProviderCookieMode(rawValue: raw)
+    {
+      configuration.cookieMode = cookieMode
+    }
+    configuration.region =
+      defaults.string(forKey: providerKey(providerID, suffix: "region")) ?? ""
+    configuration.workspaceID =
+      defaults.string(forKey: providerKey(providerID, suffix: "workspaceID")) ?? ""
+    configuration.enterpriseHost =
+      defaults.string(forKey: providerKey(providerID, suffix: "enterpriseHost")) ?? ""
+    configuration.awsProfile =
+      defaults.string(forKey: providerKey(providerID, suffix: "awsProfile")) ?? ""
+    configuration.awsAuthMode =
+      defaults.string(forKey: providerKey(providerID, suffix: "awsAuthMode")) ?? ""
+    do {
+      configuration.apiKey =
+        try secretStore.value(provider: providerID, field: .apiKey) ?? ""
+      configuration.secretKey =
+        try secretStore.value(provider: providerID, field: .secretKey) ?? ""
+      configuration.cookieHeader =
+        try secretStore.value(provider: providerID, field: .cookieHeader) ?? ""
+    } catch {
+      LocalLog.record(
+        "\(providerID.displayName) credential load failed: \(error.localizedDescription)"
+      )
+    }
+    return configuration
+  }
+
+  private static func defaultEnabled(for providerID: ProviderID) -> Bool {
+    switch providerID {
+    case .claudeCode, .codex, .antigravity, .cursor:
+      true
+    default:
+      false
+    }
+  }
+
+  private static func defaultCadence(for providerID: ProviderID) -> RefreshCadence {
+    switch providerID {
+    case .codex:
+      .fortyFiveSeconds
+    case .antigravity, .cursor:
+      .oneMinute
+    default:
+      .fiveMinutes
+    }
   }
 
   private enum Keys {
-    static let claudeEnabled = "providers.claude.enabled"
-    static let codexEnabled = "providers.codex.enabled"
-    static let antigravityEnabled = "providers.antigravity.enabled"
-    static let cursorEnabled = "providers.cursor.enabled"
-    static let claudeCadence = "providers.claude.cadence"
-    static let codexCadence = "providers.codex.cadence"
-    static let antigravityCadence = "providers.antigravity.cadence"
-    static let cursorCadence = "providers.cursor.cadence"
     static let claudeCachePollCadence = "providers.claude.cacheCadence"
-    static let cursorBrowserAccessEnabled = "providers.cursor.browserAccess"
     static let useClaudeWeeklyResetOverride = "providers.claude.useWeeklyResetOverride"
     static let claudeWeeklyResetOverride = "providers.claude.weeklyResetOverride"
     static let notificationsEnabled = "notifications.enabled"
+    static let anomalyNotificationsEnabled = "notifications.anomaliesEnabled"
     static let badPaceThreshold = "notifications.badPaceThreshold"
     static let launchAtLogin = "general.launchAtLogin"
     static let paceThemeStyle = "general.paceThemeStyle"
+    static let expandedPopover = "general.expandedPopover"
+    static let personalizedForecastingEnabled = "forecast.personalizedEnabled"
   }
 }

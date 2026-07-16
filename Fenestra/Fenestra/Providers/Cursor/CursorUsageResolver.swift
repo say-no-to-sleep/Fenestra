@@ -8,6 +8,28 @@ struct CursorResolvedUsage: Equatable {
 }
 
 enum CursorUsageResolver {
+  static func monthlyWindow(
+    usage: CursorResolvedUsage,
+    start: Date?,
+    end: Date?,
+    breakdown: [UsageBreakdownItem]
+  ) -> UsageWindowSnapshot {
+    UsageWindowSnapshot(
+      id: "cursor-monthly-v2",
+      kind: .monthly,
+      label: "Monthly",
+      windowStart: start,
+      windowEnd: end,
+      quotaTotal: usage.quotaTotal,
+      used: usage.used,
+      remainingPercent: max(0, 100 - usage.totalPercent),
+      resetSource: end == nil ? nil : "Cursor billing data",
+      breakdown: breakdown.filter {
+        $0.id.caseInsensitiveCompare("total") != .orderedSame
+      }
+    )
+  }
+
   static func resolve(
     summary: CursorUsageSummary,
     legacy: CursorLegacyUsage?,

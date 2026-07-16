@@ -12,11 +12,17 @@ private struct HeatCell: Identifiable {
 struct ActivityHistoryView: View {
   let activity: [DailyActivity]
   let pace: [DailyPace]
+  var onContentHeightChange: (CGFloat) -> Void = { _ in }
 
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 22) {
-        Text("90-day activity")
+        HStack {
+          Text("90-day quota activity")
+          Spacer()
+          ActivityScale()
+            .accessibilityHidden(true)
+        }
           .font(.headline)
         ActivityHeatmap(cells: heatCells)
           .frame(height: 180)
@@ -27,6 +33,11 @@ struct ActivityHistoryView: View {
           .frame(height: 190)
       }
       .padding(18)
+      .onGeometryChange(for: CGFloat.self) { proxy in
+        proxy.size.height
+      } action: { height in
+        onContentHeightChange(height)
+      }
     }
     .scrollEdgeEffectStyle(.soft, for: .top)
   }
@@ -54,18 +65,42 @@ struct ActivityHistoryView: View {
   }
 }
 
-private struct ActivityHeatmap: View {
+private struct ActivityHeatmap: View, AXChartDescriptorRepresentable {
   let cells: [HeatCell]
   @Environment(\.paceTheme) private var paceTheme
+  @State private var hoveredCell: HeatCell?
 
   var body: some View {
     Chart(cells) { cell in
       RectangleMark(
         x: .value("Week", cell.week, unit: .weekOfYear),
-        y: .value("Weekday", cell.weekday)
+        y: .value("Weekday", cell.weekday),
+        width: .fixed(11),
+        height: .fixed(11)
       )
       .foregroundStyle(activityColor(cell.amount))
       .cornerRadius(2)
+      if hoveredCell?.id == cell.id {
+        RectangleMark(
+          x: .value("Selected week", cell.week, unit: .weekOfYear),
+          y: .value("Selected weekday", cell.weekday),
+          width: .fixed(11),
+          height: .fixed(11)
+        )
+        .foregroundStyle(Color.clear)
+        .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+          VStack(spacing: 1) {
+            Text(cell.date, format: .dateTime.month(.abbreviated).day())
+              .foregroundStyle(.secondary)
+            Text("\(cell.amount.formatted(.number.precision(.fractionLength(0)))) pp used")
+              .bold()
+          }
+          .font(.caption2)
+          .padding(.horizontal, 6)
+          .padding(.vertical, 3)
+          .background { RoundedRectangle(cornerRadius: 6).fill(.regularMaterial) }
+        }
+      }
     }
     .chartYAxis {
       AxisMarks(values: [2, 4, 6]) { value in
@@ -82,7 +117,34 @@ private struct ActivityHeatmap: View {
       }
     }
     .chartLegend(.hidden)
+    .chartOverlay { proxy in
+      GeometryReader { geometry in
+        Rectangle().fill(.clear).contentShape(.rect)
+          .onContinuousHover { phase in
+            switch phase {
+            case .active(let location):
+              guard let plotFrame = proxy.plotFrame else { return }
+              let point = CGPoint(
+                x: location.x - geometry[plotFrame].origin.x,
+                y: location.y - geometry[plotFrame].origin.y
+              )
+              guard let date: Date = proxy.value(atX: point.x),
+                let weekday: Int = proxy.value(atY: point.y)
+              else { return }
+              hoveredCell = cells.min {
+                let lhs = abs($0.week.timeIntervalSince(date)) + Double(abs($0.weekday - weekday))
+                let rhs = abs($1.week.timeIntervalSince(date)) + Double(abs($1.weekday - weekday))
+                return lhs < rhs
+              }
+            case .ended:
+              hoveredCell = nil
+            }
+          }
+      }
+    }
     .accessibilityLabel("Daily usage activity heatmap")
+    .accessibilityChartDescriptor(self)
+    .accessibilityElement(children: .ignore)
   }
 
   private func activityColor(_ amount: Double) -> Color {
@@ -95,11 +157,56 @@ private struct ActivityHeatmap: View {
     guard symbols.indices.contains(weekday - 1) else { return "" }
     return symbols[weekday - 1]
   }
+
+  func makeChartDescriptor() -> AXChartDescriptor {
+    let sorted = cells.sorted { $0.date < $1.date }
+    let first = sorted.first?.date ?? Date()
+    let last = sorted.last?.date ?? first
+    let maximum = max(1, sorted.map(\.amount).max() ?? 1)
+    return AXChartDescriptor(
+      title: "90-day quota activity",
+      summary: "Daily quota percentage points used",
+      xAxis: AXNumericDataAxisDescriptor(
+        title: "Date",
+        range: first.timeIntervalSince1970...last.timeIntervalSince1970,
+        gridlinePositions: []
+      ) { Date(timeIntervalSince1970: $0).formatted(date: .abbreviated, time: .omitted) },
+      yAxis: AXNumericDataAxisDescriptor(
+        title: "Quota used", range: 0...maximum, gridlinePositions: []
+      ) { "\($0.formatted(.number.precision(.fractionLength(0)))) percentage points" },
+      additionalAxes: [],
+      series: [
+        AXDataSeriesDescriptor(
+          name: "Quota used",
+          isContinuous: false,
+          dataPoints: sorted.map { .init(x: $0.date.timeIntervalSince1970, y: $0.amount) }
+        )
+      ]
+    )
+  }
 }
 
-private struct PaceSparkline: View {
+private struct ActivityScale: View {
+  var body: some View {
+    HStack(spacing: 3) {
+      Text("Less")
+      ForEach(0..<4, id: \.self) { index in
+        RoundedRectangle(cornerRadius: 1)
+          .fill(Color.green.opacity(0.15 + Double(index) * 0.2))
+          .frame(width: 8, height: 8)
+      }
+      Text("More")
+    }
+    .font(.caption2)
+    .foregroundStyle(.secondary)
+    .accessibilityLabel("Activity scale, less to more quota used")
+  }
+}
+
+private struct PaceSparkline: View, AXChartDescriptorRepresentable {
   let points: [DailyPace]
   @Environment(\.paceTheme) private var paceTheme
+  @State private var hoveredPoint: DailyPace?
 
   var body: some View {
     if points.isEmpty {
@@ -128,14 +235,89 @@ private struct PaceSparkline: View {
         )
         .foregroundStyle(paceTheme.color(delta: point.delta))
         .symbolSize(24)
+
+        if hoveredPoint?.date == point.date {
+          RuleMark(x: .value("Selected date", point.date))
+            .foregroundStyle(.secondary.opacity(0.5))
+            .annotation(position: .top, overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+              VStack(spacing: 1) {
+                Text(point.date, format: .dateTime.month(.abbreviated).day())
+                  .foregroundStyle(.secondary)
+                Text("\(point.delta.formatted(.number.precision(.fractionLength(0))))% pace")
+                  .bold()
+              }
+              .font(.caption2)
+              .padding(.horizontal, 6)
+              .padding(.vertical, 3)
+              .background { RoundedRectangle(cornerRadius: 6).fill(.regularMaterial) }
+            }
+        }
+
+        RuleMark(y: .value("Even pace", 0))
+          .foregroundStyle(.secondary.opacity(0.5))
       }
       .chartYAxis {
         AxisMarks {
           AxisGridLine()
-          AxisValueLabel()
+          AxisValueLabel(format: Decimal.FormatStyle.Percent.percent.scale(1))
+        }
+      }
+      .chartOverlay { proxy in
+        GeometryReader { geometry in
+          Rectangle().fill(.clear).contentShape(.rect)
+            .onContinuousHover { phase in
+              switch phase {
+              case .active(let location):
+                guard let plotFrame = proxy.plotFrame else { return }
+                let x = location.x - geometry[plotFrame].origin.x
+                guard let date: Date = proxy.value(atX: x) else { return }
+                hoveredPoint = points.min {
+                  abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+                }
+              case .ended:
+                hoveredPoint = nil
+              }
+            }
         }
       }
       .accessibilityLabel("Worst daily pace delta")
+      .accessibilityChartDescriptor(self)
+      .accessibilityElement(children: .ignore)
     }
   }
+
+  func makeChartDescriptor() -> AXChartDescriptor {
+    let sorted = points.sorted { $0.date < $1.date }
+    let first = sorted.first?.date ?? Date()
+    let last = sorted.last?.date ?? first
+    let minimum = min(-1, sorted.map(\.delta).min() ?? -1)
+    let maximum = max(1, sorted.map(\.delta).max() ?? 1)
+    return AXChartDescriptor(
+      title: "Worst daily pace",
+      summary: "Daily pace delta in percentage points",
+      xAxis: AXNumericDataAxisDescriptor(
+        title: "Date",
+        range: first.timeIntervalSince1970...last.timeIntervalSince1970,
+        gridlinePositions: []
+      ) { Date(timeIntervalSince1970: $0).formatted(date: .abbreviated, time: .omitted) },
+      yAxis: AXNumericDataAxisDescriptor(
+        title: "Pace delta", range: minimum...maximum, gridlinePositions: [0]
+      ) { "\($0.formatted(.number.precision(.fractionLength(0)))) percent" },
+      additionalAxes: [],
+      series: [
+        AXDataSeriesDescriptor(
+          name: "Worst pace",
+          isContinuous: true,
+          dataPoints: sorted.map { .init(x: $0.date.timeIntervalSince1970, y: $0.delta) }
+        )
+      ]
+    )
+  }
 }
+
+#if DEBUG
+  #Preview("History") {
+    ActivityHistoryView(activity: PreviewFixtures.history, pace: PreviewFixtures.pace)
+      .frame(width: 580, height: 520)
+  }
+#endif
