@@ -1,22 +1,12 @@
 import AppKit
 import SwiftUI
 
-private enum DashboardMode: String, CaseIterable, Identifiable {
-  case pace = "Pace"
-  case history = "History"
-  case timeline = "Timeline"
-  case health = "Health"
-
-  var id: String { rawValue }
-}
-
 struct DashboardView: View {
   @Bindable var store: FenestraStore
-  @State private var mode: DashboardMode = .pace
   @State private var contentHeight: CGFloat = 220
 
   var body: some View {
-    Group {
+    TimelineView(.periodic(from: .now, by: 60)) { _ in
       if store.settings.expandedPopover {
         expandedDashboard
       } else {
@@ -29,12 +19,11 @@ struct DashboardView: View {
       await store.start()
     }
     .onChange(of: store.selectedProvider) { contentHeight = 220 }
-    .onChange(of: mode) { contentHeight = 390 }
   }
 
   private var expandedDashboard: some View {
     VStack(spacing: 0) {
-      DashboardHeader(store: store, mode: $mode)
+      DashboardHeader(store: store)
       Divider()
       dashboardContent
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -42,8 +31,8 @@ struct DashboardView: View {
       DashboardFooter(suggestion: store.smartSuggestion)
     }
     .frame(
-      width: store.selectedProvider == .antigravity && mode == .pace ? 820 : 580,
-      height: min(690, max(360, contentHeight + 145))
+      width: store.selectedProvider == .antigravity ? 820 : 580,
+      height: min(690, max(360, contentHeight + 115))
     )
   }
 
@@ -81,16 +70,6 @@ struct DashboardView: View {
       } description: {
         Text("Enable at least one provider in Settings.")
       }
-    } else if mode == .history {
-      ActivityHistoryView(
-        activity: store.history.dailyActivity(providerID: store.selectedProvider),
-        pace: store.history.dailyWorstPace(providerID: store.selectedProvider),
-        onContentHeightChange: { contentHeight = $0 }
-      )
-    } else if mode == .timeline {
-      ResetTimelineView(items: store.resetTimeline) { contentHeight = $0 }
-    } else if mode == .health {
-      ProviderHealthView(store: store) { contentHeight = $0 }
     } else {
       ProviderStateView(
         providerID: store.selectedProvider,
@@ -104,12 +83,10 @@ struct DashboardView: View {
 
 private struct DashboardHeader: View {
   @Bindable var store: FenestraStore
-  @Binding var mode: DashboardMode
   @Environment(\.openSettings) private var openSettings
 
   var body: some View {
-    VStack(spacing: 10) {
-      HStack(spacing: 10) {
+    HStack(spacing: 10) {
         Picker("Provider", selection: providerSelection) {
           ForEach(store.settings.enabledProviders) { providerID in
             Label(providerID.displayName, systemImage: providerID.systemImage)
@@ -119,15 +96,16 @@ private struct DashboardHeader: View {
         }
         .labelsHidden()
         .pickerStyle(.menu)
+        .help("Switch provider: ⌘[ / ⌘]. Jump to a provider: ⌘1–⌘9.")
         .frame(minWidth: 190, alignment: .leading)
-        .accessibilityLabel("Provider")
+        let isRefreshing = store.state(for: store.selectedProvider).availability == .loading
 
         Button("Refresh", systemImage: "arrow.clockwise") {
           Task { await store.refresh(store.selectedProvider, force: true) }
         }
         .labelStyle(.iconOnly)
-        .help("Refresh")
-        .disabled(!store.settings.isEnabled(store.selectedProvider))
+        .help(isRefreshing ? "Refreshing…" : "Refresh")
+        .disabled(!store.settings.isEnabled(store.selectedProvider) || isRefreshing)
 
         Button {
           SettingsPresentation.open(using: openSettings)
@@ -142,17 +120,6 @@ private struct DashboardHeader: View {
         }
         .labelStyle(.iconOnly)
         .help("Use compact view")
-      }
-
-      Picker("View", selection: $mode) {
-        ForEach(DashboardMode.allCases) { item in
-          Text(item.rawValue).tag(item)
-        }
-      }
-      .labelsHidden()
-      .pickerStyle(.segmented)
-      .controlSize(.small)
-      .frame(maxWidth: 220)
     }
     .padding(14)
   }
@@ -172,11 +139,19 @@ private struct CompactDashboardView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       HStack {
-        Label("Fenestra", systemImage: "gauge.with.dots.needle.50percent")
-          .font(.headline)
+        Picker("Provider", selection: Binding(
+          get: { store.selectedProvider }, set: { store.select($0) }
+        )) {
+          ForEach(store.settings.enabledProviders) { provider in
+            Text(provider.displayName).tag(provider)
+          }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .help("Switch provider: ⌘[ / ⌘]. Jump to a provider: ⌘1–⌘9.")
         Spacer()
         Button("Refresh", systemImage: "arrow.clockwise") {
-          Task { await store.refreshAll() }
+          Task { await store.refresh(store.selectedProvider, force: true) }
         }
         .labelStyle(.iconOnly)
         Button("Settings", systemImage: "gear") {
@@ -189,17 +164,21 @@ private struct CompactDashboardView: View {
         .labelStyle(.iconOnly)
       }
 
-      if let urgent = store.urgentQuota {
+      if let urgent = store.selectedMenuQuota {
         VStack(alignment: .leading, spacing: 4) {
           Text("\(urgent.providerID.displayName) · \(urgent.windowName)")
             .font(.caption)
             .foregroundStyle(.secondary)
           Text("\(urgent.remainingPercent.formatted(.number.precision(.fractionLength(0))))% remaining")
             .font(.title2.bold())
-          if let prediction = urgent.prediction {
+          if store.isStale(store.selectedProvider) {
+            Label("Saved usage · refresh needed", systemImage: "exclamationmark.triangle")
+              .font(.caption)
+              .foregroundStyle(.orange)
+          } else if let prediction = urgent.prediction {
             ForecastEvidenceView(prediction: prediction, reset: urgent.reset)
           } else if let delta = urgent.paceDelta {
-            Text(delta < 0 ? "\(abs(delta).rounded().formatted())% over pace" : "On pace")
+            Text(PaceEvaluation(idealRemaining: 0, delta: delta, exhaustionPrediction: nil).label)
               .font(.caption)
               .foregroundStyle(.secondary)
           }
@@ -209,7 +188,7 @@ private struct CompactDashboardView: View {
           .foregroundStyle(.secondary)
       }
 
-      if let anomaly = store.history.activeAnomalies.first {
+      if let anomaly = store.history.activeAnomalies.first(where: { $0.providerID == store.selectedProvider }) {
         Label(anomaly.kind.title, systemImage: "waveform.path.ecg.rectangle")
           .font(.caption.weight(.semibold))
           .foregroundStyle(anomaly.alertable ? .orange : .secondary)
@@ -218,7 +197,7 @@ private struct CompactDashboardView: View {
       Divider()
       VStack(alignment: .leading, spacing: 6) {
         Text("Next resets").font(.caption.weight(.semibold))
-        ForEach(Array(store.resetTimeline.prefix(3))) { item in
+        ForEach(Array(store.resetTimeline.filter { $0.providerID == store.selectedProvider }.prefix(3))) { item in
           HStack {
             Text("\(item.providerID.displayName) · \(item.windowName)")
             Spacer()
@@ -277,6 +256,7 @@ private struct ProviderStateView: View {
       if let snapshot = state.snapshot {
         ProviderDashboardContent(
           snapshot: snapshot,
+          isRefreshing: state.availability == .loading,
           errorMessage: nil,
           store: store,
           onContentHeightChange: onContentHeightChange
@@ -293,6 +273,7 @@ private struct ProviderStateView: View {
       if let snapshot = state.snapshot {
         ProviderDashboardContent(
           snapshot: snapshot,
+          isRefreshing: false,
           errorMessage: errorMessage,
           store: store,
           onContentHeightChange: onContentHeightChange
@@ -319,6 +300,7 @@ private struct UnavailableProviderView: View {
   let providerID: ProviderID
   let message: String
   let store: FenestraStore
+  @Environment(\.openSettings) private var openSettings
 
   var body: some View {
     ContentUnavailableView {
@@ -326,6 +308,13 @@ private struct UnavailableProviderView: View {
     } description: {
       Text(message)
     } actions: {
+      Button("Retry", systemImage: "arrow.clockwise") {
+        Task { await store.refresh(providerID, force: true) }
+      }
+      Button("Connection settings", systemImage: "gear") {
+        store.providerToConfigure = providerID
+        SettingsPresentation.open(using: openSettings)
+      }
       if providerID == .claudeCode, message.localizedCaseInsensitiveContains("Keychain") {
         Button("Allow OAuth Access") {
           Task { await store.authorizeClaudeKeychainAccess() }

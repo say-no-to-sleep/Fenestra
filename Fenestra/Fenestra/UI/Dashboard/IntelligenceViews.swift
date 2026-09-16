@@ -3,15 +3,18 @@ import SwiftUI
 struct ForecastEvidenceView: View {
   let prediction: ExhaustionPrediction
   let reset: Date?
+  var showsStatus: Bool = true
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
+      if showsStatus {
       if prediction.hasRange, let earliest = prediction.earliest, let latest = prediction.latest {
         Text(statusText(earliest: earliest, latest: latest))
           .font(.caption.weight(.semibold))
       } else {
         Text("Estimate unstable")
           .font(.caption.weight(.semibold))
+      }
       }
       if prediction.method != .recent {
         Text(evidenceText)
@@ -42,6 +45,10 @@ struct ForecastEvidenceView: View {
   }
 
   private static func range(_ earliest: Date, _ latest: Date) -> String {
+    if latest.timeIntervalSince(earliest) >= 24 * 60 * 60 {
+      return earliest.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+        + "–" + latest.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+    }
     let calendar = Calendar.autoupdatingCurrent
     let prefix: String
     if calendar.isDateInToday(earliest) { prefix = "" }

@@ -9,8 +9,18 @@ final class ClaudeCodeProvider: UsageProvider {
   var cacheAnalysisInterval: TimeInterval?
 
   private let rateLimitGate = ClaudeUsageRateLimitGate()
+  private let refreshGate = ClaudeUsageRateLimitGate(
+    blockedUntilKey: ClaudeUsageRateLimitGate.tokenRefreshBlockedUntilKey,
+    cooldown: ClaudeUsageRateLimitGate.tokenRefreshCooldown
+  )
   private let projectsURL = FileManager.default.homeDirectoryForCurrentUser
     .appending(path: ".claude/projects")
+  private var tokenRefreshTask: Task<ClaudeCredentials, Error>?
+  private var blockedRefreshFingerprint: Int?
+
+  func prepareForcedRefresh() {
+    blockedRefreshFingerprint = nil
+  }
 
   func refreshCacheAnalysis() async -> Double? {
     await ClaudeCacheAnalyzer.shared.markDirty(projectsURL: projectsURL)
@@ -60,13 +70,111 @@ final class ClaudeCodeProvider: UsageProvider {
   }
 
   private func authenticatedUsage() async throws -> (ClaudeUsageResponse, ClaudeCredentials) {
-    let credentials = try ClaudeCredentialStore.load()
+    var credentials = try await ensureFreshCredentials(try ClaudeCredentialStore.load())
     do {
       let usage = try await fetchUsage(accessToken: credentials.accessToken)
       return (usage, credentials)
     } catch ClaudeAPIError.unauthorized {
+      // Throttled: a 401 every poll must not mean a Keychain prompt every poll.
+      credentials = try ClaudeCredentialStore.reload() ?? credentials
+      if !credentials.isExpired() {
+        do {
+          let usage = try await fetchUsage(accessToken: credentials.accessToken)
+          return (usage, credentials)
+        } catch ClaudeAPIError.unauthorized {
+          credentials = try await refreshCredentials(credentials, force: true)
+        }
+      } else {
+        credentials = try await refreshCredentials(credentials, force: true)
+      }
+      do {
+        let usage = try await fetchUsage(accessToken: credentials.accessToken)
+        return (usage, credentials)
+      } catch ClaudeAPIError.unauthorized {
+        throw ProviderFailure.reauthenticationRequired(
+          ClaudeOAuthRefresher.expiredSessionMessage
+        )
+      }
+    }
+  }
+
+  private func ensureFreshCredentials(
+    _ credentials: ClaudeCredentials
+  ) async throws -> ClaudeCredentials {
+    guard credentials.isExpired() else { return credentials }
+    return try await refreshCredentials(credentials, force: false)
+  }
+
+  private func refreshCredentials(
+    _ credentials: ClaudeCredentials,
+    force: Bool
+  ) async throws -> ClaudeCredentials {
+    if let tokenRefreshTask {
+      return try await tokenRefreshTask.value
+    }
+    let task = Task { @MainActor in
+      try await self.performTokenRefresh(credentials, force: force)
+    }
+    tokenRefreshTask = task
+    defer { tokenRefreshTask = nil }
+    return try await task.value
+  }
+
+  private func performTokenRefresh(
+    _ credentials: ClaudeCredentials,
+    force: Bool
+  ) async throws -> ClaudeCredentials {
+    guard let refreshToken = credentials.refreshToken, !refreshToken.isEmpty else {
       throw ProviderFailure.reauthenticationRequired(
-        "Claude: OAuth session expired — run `claude auth login --claudeai`"
+        ClaudeOAuthRefresher.expiredSessionMessage
+      )
+    }
+    if !force, blockedRefreshFingerprint == credentials.fingerprint {
+      throw ProviderFailure.reauthenticationRequired(
+        ClaudeOAuthRefresher.expiredSessionMessage
+      )
+    }
+    if let blockedUntil = refreshGate.blockedUntil() {
+      throw ProviderFailure.unavailable(
+        ClaudeUsageRateLimitGate.message(blockedUntil: blockedUntil, subject: "token refresh")
+      )
+    }
+
+    let request = ClaudeOAuthRefresher.tokenRequest(
+      refreshToken: refreshToken,
+      userAgent: await ClaudeCodeUserAgent.value()
+    )
+    let (data, response) = try await RestrictedHTTPClient.data(for: request)
+    switch response.statusCode {
+    case 200:
+      let tokens = try ClaudeOAuthRefresher.parseTokens(from: data)
+      try ClaudeCredentialStore.persist(tokens, replacing: credentials)
+      blockedRefreshFingerprint = nil
+      refreshGate.recordSuccess()
+      LocalLog.record("Claude: refreshed OAuth access token")
+      // persist() already primed the Keychain cache, so this is prompt-free.
+      return try ClaudeCredentialStore.load()
+    case 429:
+      let blockedUntil = refreshGate.recordRateLimit(
+        retryAfter: ClaudeUsageRateLimitGate.retryAfterDate(from: response)
+      )
+      throw ProviderFailure.unavailable(
+        ClaudeUsageRateLimitGate.message(blockedUntil: blockedUntil, subject: "token refresh")
+      )
+    case 400, 401:
+      let error = ClaudeOAuthRefresher.oauthErrorCode(from: data)
+      if error == "invalid_grant" {
+        blockedRefreshFingerprint = credentials.fingerprint
+        throw ProviderFailure.reauthenticationRequired(
+          ClaudeOAuthRefresher.expiredSessionMessage
+        )
+      }
+      throw ProviderFailure.unavailable(
+        "Claude: OAuth refresh failed (HTTP \(response.statusCode))"
+      )
+    default:
+      throw ProviderFailure.unavailable(
+        "Claude: OAuth refresh failed (HTTP \(response.statusCode))"
       )
     }
   }

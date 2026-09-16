@@ -6,7 +6,53 @@ private struct HeatCell: Identifiable {
   let date: Date
   let week: Date
   let weekday: Int
-  let amount: Double
+  let amount: Double?
+}
+
+struct ProviderHistoryView: View {
+  let store: FenestraStore
+  let onContentHeightChange: (CGFloat) -> Void
+  @State private var selection = ""
+
+  private var choices: [(pool: UsagePoolSnapshot, window: UsageWindowSnapshot)] {
+    (store.state(for: store.selectedProvider).snapshot?.pools ?? []).flatMap { pool in
+      pool.windows.map { (pool, $0) }
+    }
+  }
+
+  private var selected: (pool: UsagePoolSnapshot, window: UsageWindowSnapshot)? {
+    choices.first { "\($0.pool.id)|\($0.window.id)" == selection }
+      ?? choices.min { FenestraStore.menuWindowRank($0.window) < FenestraStore.menuWindowRank($1.window) }
+  }
+
+  var body: some View {
+    if let selected {
+      VStack(spacing: 0) {
+        Picker("Quota", selection: Binding(
+          get: { "\(selected.pool.id)|\(selected.window.id)" }, set: { selection = $0 }
+        )) {
+          ForEach(store.state(for: store.selectedProvider).snapshot?.pools ?? []) { pool in
+            ForEach(pool.windows) { window in
+              Text(pool.name == "Default" ? window.label : "\(pool.name) · \(window.label)")
+                .tag("\(pool.id)|\(window.id)")
+            }
+          }
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 12)
+        ActivityHistoryView(
+          activity: store.history.dailyActivity(providerID: store.selectedProvider,
+                                                poolID: selected.pool.id, windowID: selected.window.id),
+          pace: store.history.dailyWorstPace(providerID: store.selectedProvider,
+                                            poolID: selected.pool.id, windowID: selected.window.id),
+          onContentHeightChange: { onContentHeightChange($0 + 45) }
+        )
+      }
+    } else {
+      ContentUnavailableView("No quota history", systemImage: "clock",
+                             description: Text("Connect a provider to begin recording usage."))
+    }
+  }
 }
 
 struct ActivityHistoryView: View {
@@ -18,7 +64,7 @@ struct ActivityHistoryView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 22) {
         HStack {
-          Text("90-day quota activity")
+          Text("90-day observed quota use")
           Spacer()
           ActivityScale()
             .accessibilityHidden(true)
@@ -27,6 +73,9 @@ struct ActivityHistoryView: View {
         ActivityHeatmap(cells: heatCells)
           .frame(height: 180)
 
+        Text("Each day shows observed percentage points used for this quota. Unobserved periods are not estimated.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
         Text("Worst daily pace")
           .font(.headline)
         PaceSparkline(points: pace)
@@ -59,7 +108,7 @@ struct ActivityHistoryView: View {
         date: day,
         week: week,
         weekday: weekday,
-        amount: values[day] ?? 0
+        amount: values[day]
       )
     }
   }
@@ -92,7 +141,7 @@ private struct ActivityHeatmap: View, AXChartDescriptorRepresentable {
           VStack(spacing: 1) {
             Text(cell.date, format: .dateTime.month(.abbreviated).day())
               .foregroundStyle(.secondary)
-            Text("\(cell.amount.formatted(.number.precision(.fractionLength(0)))) pp used")
+            Text(cell.amount.map { "\($0.formatted(.number.precision(.fractionLength(0)))) pp observed" } ?? "No data")
               .bold()
           }
           .font(.caption2)
@@ -147,8 +196,9 @@ private struct ActivityHeatmap: View, AXChartDescriptorRepresentable {
     .accessibilityElement(children: .ignore)
   }
 
-  private func activityColor(_ amount: Double) -> Color {
-    guard amount > 0 else { return .secondary.opacity(0.12) }
+  private func activityColor(_ amount: Double?) -> Color {
+    guard let amount else { return .secondary.opacity(0.04) }
+    guard amount > 0 else { return .secondary.opacity(0.20) }
     return paceTheme.underPace.opacity(min(0.9, 0.25 + amount / 40))
   }
 
@@ -162,7 +212,7 @@ private struct ActivityHeatmap: View, AXChartDescriptorRepresentable {
     let sorted = cells.sorted { $0.date < $1.date }
     let first = sorted.first?.date ?? Date()
     let last = sorted.last?.date ?? first
-    let maximum = max(1, sorted.map(\.amount).max() ?? 1)
+    let maximum = max(1, sorted.compactMap(\.amount).max() ?? 1)
     return AXChartDescriptor(
       title: "90-day quota activity",
       summary: "Daily quota percentage points used",
@@ -179,7 +229,9 @@ private struct ActivityHeatmap: View, AXChartDescriptorRepresentable {
         AXDataSeriesDescriptor(
           name: "Quota used",
           isContinuous: false,
-          dataPoints: sorted.map { .init(x: $0.date.timeIntervalSince1970, y: $0.amount) }
+          dataPoints: sorted.compactMap { cell in
+            cell.amount.map { .init(x: cell.date.timeIntervalSince1970, y: $0) }
+          }
         )
       ]
     )
@@ -187,12 +239,16 @@ private struct ActivityHeatmap: View, AXChartDescriptorRepresentable {
 }
 
 private struct ActivityScale: View {
+  @Environment(\.paceTheme) private var paceTheme
+
   var body: some View {
     HStack(spacing: 3) {
+      Rectangle().fill(.secondary.opacity(0.04)).frame(width: 8, height: 8)
+      Text("No data").padding(.trailing, 8)
       Text("Less")
       ForEach(0..<4, id: \.self) { index in
         RoundedRectangle(cornerRadius: 1)
-          .fill(Color.green.opacity(0.15 + Double(index) * 0.2))
+          .fill(paceTheme.underPace.opacity(0.25 + Double(index) * 0.2))
           .frame(width: 8, height: 8)
       }
       Text("More")
@@ -243,7 +299,7 @@ private struct PaceSparkline: View, AXChartDescriptorRepresentable {
               VStack(spacing: 1) {
                 Text(point.date, format: .dateTime.month(.abbreviated).day())
                   .foregroundStyle(.secondary)
-                Text("\(point.delta.formatted(.number.precision(.fractionLength(0))))% pace")
+                Text("\(point.delta.formatted(.number.precision(.fractionLength(0)))) pp pace")
                   .bold()
               }
               .font(.caption2)
@@ -257,9 +313,11 @@ private struct PaceSparkline: View, AXChartDescriptorRepresentable {
           .foregroundStyle(.secondary.opacity(0.5))
       }
       .chartYAxis {
-        AxisMarks {
+        AxisMarks { value in
           AxisGridLine()
-          AxisValueLabel(format: Decimal.FormatStyle.Percent.percent.scale(1))
+          AxisValueLabel {
+            if let delta = value.as(Double.self) { Text("\(delta.formatted()) pp") }
+          }
         }
       }
       .chartOverlay { proxy in
@@ -302,7 +360,7 @@ private struct PaceSparkline: View, AXChartDescriptorRepresentable {
       ) { Date(timeIntervalSince1970: $0).formatted(date: .abbreviated, time: .omitted) },
       yAxis: AXNumericDataAxisDescriptor(
         title: "Pace delta", range: minimum...maximum, gridlinePositions: [0]
-      ) { "\($0.formatted(.number.precision(.fractionLength(0)))) percent" },
+      ) { "\($0.formatted(.number.precision(.fractionLength(0)))) percentage points" },
       additionalAxes: [],
       series: [
         AXDataSeriesDescriptor(

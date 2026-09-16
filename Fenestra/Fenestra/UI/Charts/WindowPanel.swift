@@ -31,10 +31,12 @@ struct WindowPanel: View {
   let freshness: Date
   let history: [HistoryPoint]
   let evaluation: PaceEvaluation?
+  var embedded: Bool = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      WindowPanelHeader(window: window, evaluation: evaluation)
+      Text(window.label)
+        .font(.headline)
       if let windowStart = window.windowStart,
         let windowEnd = window.windowEnd,
         windowEnd > windowStart
@@ -47,7 +49,7 @@ struct WindowPanel: View {
           history: history,
           evaluation: evaluation
         )
-        .frame(minHeight: 155)
+        .frame(minHeight: 177)
       } else {
         UnknownTimelineView(window: window)
       }
@@ -60,16 +62,17 @@ struct WindowPanel: View {
         PredictionBanner(status: status)
       }
       if let prediction = evaluation?.exhaustionPrediction, prediction.method != .recent {
-        ForecastEvidenceView(prediction: prediction, reset: window.windowEnd)
+        ForecastEvidenceView(prediction: prediction, reset: window.windowEnd, showsStatus: false)
       }
       if !window.breakdown.isEmpty {
         UsageBreakdown(items: window.breakdown)
       }
     }
-    .padding(12)
+    .padding(embedded ? 0 : 12)
     .background {
-      RoundedRectangle(cornerRadius: 12)
-        .fill(.quaternary.opacity(0.45))
+      if !embedded {
+        RoundedRectangle(cornerRadius: 12).fill(.quaternary.opacity(0.45))
+      }
     }
     .accessibilityElement(children: .contain)
     .accessibilityLabel("\(providerID.displayName), \(pool.name), \(window.label)")
@@ -90,29 +93,7 @@ struct WindowPanel: View {
   }
 }
 
-private struct WindowPanelHeader: View {
-  let window: UsageWindowSnapshot
-  let evaluation: PaceEvaluation?
-  @Environment(\.paceTheme) private var paceTheme
-
-  var body: some View {
-    HStack(alignment: .firstTextBaseline, spacing: 10) {
-      Text(window.label)
-        .font(.headline)
-      Spacer()
-      Text("\(window.remainingPercent.formatted(.number.precision(.fractionLength(0))))% left")
-        .font(.callout.monospacedDigit())
-        .foregroundStyle(.secondary)
-      if let evaluation {
-        Text(evaluation.label)
-          .font(.callout.weight(.semibold))
-          .foregroundStyle(paceTheme.color(isOverPace: evaluation.isOverPace))
-      }
-    }
-  }
-}
-
-private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
+struct WindowPaceChart: View, AXChartDescriptorRepresentable {
   let window: UsageWindowSnapshot
   let windowStart: Date
   let windowEnd: Date
@@ -123,13 +104,50 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
   @State private var hoveredDate: Date?
   @State private var zoomDomain: ClosedRange<Date>?
   @State private var pendingZoom: ClosedRange<Date>?
+  @State private var zoomYDomain: ClosedRange<Double>?
+  @State private var pendingZoomY: ClosedRange<Double>?
 
   private var visibleDomain: ClosedRange<Date> {
     zoomDomain ?? windowStart...windowEnd
   }
 
+  static func hourlyTicks(in domain: ClosedRange<Date>) -> [Date] {
+    stride(from: domain.lowerBound.timeIntervalSinceReferenceDate,
+           through: domain.upperBound.timeIntervalSinceReferenceDate, by: 60 * 60)
+      .map { Date(timeIntervalSinceReferenceDate: $0) }
+  }
+
   private var yDomain: ClosedRange<Double> {
-    min(0, window.remainingPercent - 10)...max(100, window.remainingPercent + 10)
+    zoomYDomain ?? min(0, window.remainingPercent)...max(100, window.remainingPercent)
+  }
+
+  static func isVerticalDrag(width: CGFloat, height: CGFloat) -> Bool {
+    abs(height) >= 8 && abs(height) >= 2 * abs(width)
+  }
+
+  static func quotaSelection(from start: Double, to end: Double, dragHeight: CGFloat) -> ClosedRange<Double>? {
+    guard abs(dragHeight) >= 8, start.isFinite, end.isFinite, start != end else { return nil }
+    return min(start, end)...max(start, end)
+  }
+
+  static func quotaLabelPositions(actualY: CGFloat, idealY: CGFloat,
+                                  bounds: ClosedRange<CGFloat>) -> (actual: CGFloat, pace: CGFloat, ideal: CGFloat) {
+    // Keep nearby labels readable while preserving their vertical order.
+    let top = max(bounds.lowerBound + 9, min(actualY, idealY))
+    let bottom = min(bounds.upperBound - 9, max(actualY, idealY))
+    let halfSpan = min(max(20, (bottom - top) / 2), max(0, (bounds.upperBound - bounds.lowerBound) / 2 - 9))
+    let middle = min(bounds.upperBound - 9 - halfSpan,
+                     max(bounds.lowerBound + 9 + halfSpan, (top + bottom) / 2))
+    return actualY <= idealY
+      ? (middle - halfSpan, middle, middle + halfSpan)
+      : (middle + halfSpan, middle, middle - halfSpan)
+  }
+
+  private func resetZoom() {
+    zoomDomain = nil
+    zoomYDomain = nil
+    pendingZoom = nil
+    pendingZoomY = nil
   }
 
   private var samples: [WindowChartSample] {
@@ -166,10 +184,6 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
         ))
     }
     return values
-  }
-
-  private var isOverPace: Bool {
-    evaluation?.isOverPace ?? samples.last?.isOverPace ?? false
   }
 
   private var paceBandSegments: [PaceBandSegment] {
@@ -242,7 +256,8 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
   }
 
   var body: some View {
-    VStack(spacing: 3) {
+    VStack(spacing: 6) {
+      ChartHoverLabel(date: hoveredDate)
       Chart {
         zoomSelectionMarks()
         idealMarks()
@@ -253,43 +268,25 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
       .chartXScale(domain: visibleDomain)
       .chartYScale(domain: yDomain)
       .chartLegend(.hidden)
-      .chartXAxis {
-        switch window.kind {
-        case .weekly:
-          if visibleDomain.upperBound.timeIntervalSince(visibleDomain.lowerBound) <= 2 * 24 * 60 * 60 {
-            AxisMarks(values: .stride(by: .hour, count: 3)) { value in
-              AxisGridLine().foregroundStyle(Color.secondary.opacity(0.12))
-              AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)), centered: true)
-            }
-          } else {
-            AxisMarks(values: .stride(by: .day)) { value in
-              AxisGridLine().foregroundStyle(Color.secondary.opacity(0.16))
-              AxisValueLabel(format: .dateTime.weekday(.narrow), centered: true)
-            }
-          }
-        case .fiveHour:
-          AxisMarks(values: .stride(by: .hour, count: 1)) { value in
-            AxisGridLine().foregroundStyle(Color.secondary.opacity(0.12))
-            AxisValueLabel(format: .dateTime.hour(.defaultDigits(amPM: .abbreviated)), centered: true)
-          }
-        case .monthly, .other:
-          AxisMarks(values: .automatic(desiredCount: 5)) { value in
-            AxisGridLine().foregroundStyle(Color.secondary.opacity(0.12))
-            AxisValueLabel(format: .dateTime.month(.abbreviated).day(), centered: true)
-          }
-        }
-      }
+      .chartXAxis(.hidden)
       .chartYAxis {
-        AxisMarks(values: [0, 50, 100]) {
+        AxisMarks(position: .leading, values: zoomYDomain != nil ? .automatic(desiredCount: 4) : .automatic(desiredCount: 3)) { value in
           AxisGridLine()
-          AxisValueLabel(anchor: .trailing)
+          AxisValueLabel {
+            if let percent = value.as(Double.self) {
+              Text("\(percent.formatted(.number.precision(.fractionLength(0))))%")
+            }
+          }
         }
       }
+      .chartPlotStyle { plot in plot.clipped() }
       .chartOverlay { proxy in
         GeometryReader { geo in
+          ZStack(alignment: .topLeading) {
           Rectangle()
             .fill(Color.clear)
             .contentShape(Rectangle())
+            .onTapGesture(count: 2) { resetZoom() }
             .onContinuousHover { phase in
               switch phase {
               case .active(let location):
@@ -311,8 +308,16 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
                   guard let start: Date = proxy.value(atX: startX),
                     let current: Date = proxy.value(atX: currentX)
                   else { return }
-                  pendingZoom = min(start, current)...max(start, current)
-                  hoveredDate = current
+                  let startY = min(frame.height, max(0, value.startLocation.y - frame.minY))
+                  let currentY = min(frame.height, max(0, value.location.y - frame.minY))
+                  guard let startQuota: Double = proxy.value(atY: startY),
+                    let currentQuota: Double = proxy.value(atY: currentY)
+                  else { return }
+                  pendingZoom = Self.isVerticalDrag(width: currentX - startX, height: currentY - startY)
+                    ? nil : min(start, current)...max(start, current)
+                  pendingZoomY = Self.quotaSelection(from: startQuota, to: currentQuota,
+                                                     dragHeight: currentY - startY)
+                  hoveredDate = nil
                 }
                 .onEnded { _ in
                   if let selection = pendingZoom,
@@ -321,9 +326,25 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
                   {
                     zoomDomain = selection
                   }
+                  if let pendingZoomY { zoomYDomain = pendingZoomY }
                   pendingZoom = nil
+                  pendingZoomY = nil
                 }
             )
+          if let plotFrame = proxy.plotFrame,
+            visibleDomain.contains(freshness), yDomain.contains(window.remainingPercent),
+            let x = proxy.position(forX: freshness),
+            let actualY = proxy.position(forY: window.remainingPercent)
+          {
+            let frame = geo[plotFrame]
+            let pointX = frame.minX + x
+            let idealY = evaluation.flatMap { proxy.position(forY: $0.idealRemaining) } ?? actualY
+            CurrentQuotaLabels(remaining: window.remainingPercent, evaluation: evaluation,
+                               actualY: frame.minY + actualY, idealY: frame.minY + idealY,
+                               pointX: pointX, plotFrame: frame)
+              .allowsHitTesting(false)
+          }
+          }
         }
       }
       .accessibilityLabel("\(window.label) remaining usage chart")
@@ -335,9 +356,9 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
         Text(visibleDomain.lowerBound, format: .dateTime.month(.abbreviated).day().hour().minute())
           .accessibilityHidden(true)
         Spacer()
-        if zoomDomain != nil {
+        if zoomDomain != nil || zoomYDomain != nil {
           Button("Reset view", systemImage: "arrow.up.left.and.arrow.down.right") {
-            zoomDomain = nil
+            resetZoom()
           }
           .labelStyle(.titleAndIcon)
           .buttonStyle(.plain)
@@ -349,26 +370,21 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
           .accessibilityHidden(true)
       }
       .font(.caption2)
-      .foregroundStyle(.tertiary)
+      .foregroundStyle(.secondary)
+
     }
-    .onChange(of: windowStart) {
-      zoomDomain = nil
-      pendingZoom = nil
-    }
-    .onChange(of: windowEnd) {
-      zoomDomain = nil
-      pendingZoom = nil
-    }
+    .onChange(of: windowStart) { resetZoom() }
+    .onChange(of: windowEnd) { resetZoom() }
   }
 
   @ChartContentBuilder
   private func zoomSelectionMarks() -> some ChartContent {
-    if let pendingZoom {
+    if pendingZoom != nil || pendingZoomY != nil {
       RectangleMark(
-        xStart: .value("Zoom start", pendingZoom.lowerBound),
-        xEnd: .value("Zoom end", pendingZoom.upperBound),
-        yStart: .value("Zoom lower bound", yDomain.lowerBound),
-        yEnd: .value("Zoom upper bound", yDomain.upperBound)
+        xStart: .value("Zoom start", pendingZoom?.lowerBound ?? visibleDomain.lowerBound),
+        xEnd: .value("Zoom end", pendingZoom?.upperBound ?? visibleDomain.upperBound),
+        yStart: .value("Zoom lower bound", pendingZoomY?.lowerBound ?? yDomain.lowerBound),
+        yEnd: .value("Zoom upper bound", pendingZoomY?.upperBound ?? yDomain.upperBound)
       )
       .foregroundStyle(.blue.opacity(0.12))
     }
@@ -407,12 +423,6 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
   }
 
-  private func nearestSample(to date: Date) -> WindowChartSample? {
-    samples.min {
-      abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-    }
-  }
-
   @ChartContentBuilder
   private func predictionMarks() -> some ChartContent {
     ForEach(predictionBand) { sample in
@@ -440,25 +450,7 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
       RuleMark(x: .value("Time", hoveredDate))
         .foregroundStyle(Color.secondary.opacity(0.5))
         .lineStyle(StrokeStyle(lineWidth: 1))
-        .annotation(
-          position: .top,
-          overflowResolution: .init(x: .fit(to: .chart), y: .disabled)
-        ) {
-          VStack(spacing: 1) {
-            Text(hoveredDate, format: .dateTime.weekday(.abbreviated).hour().minute())
-              .foregroundStyle(.secondary)
-            if let remaining = hoverRemaining(at: hoveredDate) {
-              Text("\(remaining.formatted(.number.precision(.fractionLength(0))))%")
-                .bold()
-            }
-          }
-          .font(.caption2)
-          .padding(.horizontal, 6)
-          .padding(.vertical, 3)
-          .background {
-            RoundedRectangle(cornerRadius: 6).fill(.regularMaterial)
-          }
-        }
+
     }
   }
 
@@ -484,26 +476,34 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
         y: .value("Actual remaining percent", sample.remaining),
         series: .value("Series", "Actual")
       )
-      .foregroundStyle(Color.gray.opacity(0.9))
+      .foregroundStyle(Color.blue)
       .lineStyle(StrokeStyle(lineWidth: 2))
     }
 
+    if let evaluation {
+      RuleMark(x: .value("Current time", freshness),
+               yStart: .value("Actual remaining", window.remainingPercent),
+               yEnd: .value("Even pace remaining", evaluation.idealRemaining))
+        .foregroundStyle(paceTheme.color(isOverPace: evaluation.isOverPace))
+        .lineStyle(StrokeStyle(lineWidth: 1.5))
+      PointMark(x: .value("Current time", freshness),
+                y: .value("Even pace remaining", evaluation.idealRemaining))
+        .symbol {
+          Image(systemName: evaluation.isOverPace ? "arrowtriangle.up.fill" : "arrowtriangle.down.fill")
+            .font(.system(size: 7))
+            .foregroundStyle(.blue)
+        }
+    }
     PointMark(
       x: .value("Current time", freshness),
       y: .value("Current remaining percent", window.remainingPercent)
     )
-    .foregroundStyle(paceTheme.color(isOverPace: isOverPace))
-    .symbolSize(30)
-  }
-
-  private func hoverRemaining(at date: Date) -> Double? {
-    guard date > freshness else { return nearestSample(to: date)?.remaining }
-    guard let likely = evaluation?.exhaustionPrediction?.likely else { return nil }
-    return projectedRemaining(at: date, exhaustion: likely)
+    .foregroundStyle(.blue)
+    .symbolSize(35)
   }
 
   func makeChartDescriptor() -> AXChartDescriptor {
-    let yRange = min(0, window.remainingPercent - 10)...max(100, window.remainingPercent + 10)
+    let yRange = yDomain
     let xAxis = AXNumericDataAxisDescriptor(
       title: "Time",
       range: visibleDomain.lowerBound.timeIntervalSince1970...visibleDomain.upperBound.timeIntervalSince1970,
@@ -512,7 +512,7 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
     let yAxis = AXNumericDataAxisDescriptor(
       title: "Remaining percent",
       range: yRange,
-      gridlinePositions: [0, 50, 100]
+      gridlinePositions: [0, 50, 100].filter { yRange.contains($0) }
     ) { "\($0.formatted(.number.precision(.fractionLength(0)))) percent" }
     var series = [
       AXDataSeriesDescriptor(
@@ -568,6 +568,7 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
     var parts = ["\(remaining) percent remaining"]
     if let evaluation {
       parts.append(evaluation.label)
+      parts.append("Even pace target \(evaluation.idealRemaining.rounded().formatted()) percent remaining")
       if let prediction = evaluation.exhaustionPrediction {
         parts.append(
           prediction.confidence == .unstable
@@ -577,6 +578,63 @@ private struct WindowPaceChart: View, AXChartDescriptorRepresentable {
       }
     }
     return parts.joined(separator: ", ")
+  }
+}
+
+struct ChartHoverLabel: View {
+  let date: Date?
+
+  var body: some View {
+    Text(date ?? .distantPast, format: .dateTime.month(.abbreviated).day().hour().minute())
+      .font(.caption2)
+      .monospacedDigit()
+      .foregroundStyle(.secondary)
+      .frame(maxWidth: .infinity, minHeight: 16)
+      .opacity(date == nil ? 0 : 1)
+      .accessibilityHidden(date == nil)
+  }
+}
+
+private struct CurrentQuotaLabels: View {
+  let remaining: Double
+  let evaluation: PaceEvaluation?
+  let actualY: CGFloat
+  let idealY: CGFloat
+  let pointX: CGFloat
+  let plotFrame: CGRect
+  @Environment(\.paceTheme) private var paceTheme
+
+  var body: some View {
+    let left = pointX + 118 > plotFrame.maxX
+    let x = left ? pointX - 8 - 55 : pointX + 8 + 55
+    let positions = WindowPaceChart.quotaLabelPositions(actualY: actualY, idealY: idealY,
+                                                       bounds: plotFrame.minY...plotFrame.maxY)
+    ZStack {
+      badge("\(remaining.rounded().formatted())%", color: .blue)
+        .frame(width: 110, alignment: left ? .trailing : .leading)
+        .position(x: x, y: evaluation == nil ? min(plotFrame.maxY - 9, max(plotFrame.minY + 9, actualY)) : positions.actual)
+      if let evaluation {
+        badge(evaluation.delta.rounded() == 0 ? "On pace"
+          : "\(abs(evaluation.delta).rounded().formatted())% \(evaluation.isOverPace ? "Over" : "Under") pace",
+          color: paceTheme.color(isOverPace: evaluation.isOverPace))
+          .frame(width: 110, alignment: left ? .trailing : .leading)
+          .position(x: x, y: positions.pace)
+        badge("\(evaluation.idealRemaining.rounded().formatted())%", color: .secondary)
+          .frame(width: 110, alignment: left ? .trailing : .leading)
+          .position(x: x, y: positions.ideal)
+      }
+    }
+    .font(.caption.weight(.bold))
+    .monospacedDigit()
+    .accessibilityHidden(true)
+  }
+
+  private func badge(_ text: String, color: Color) -> some View {
+    Text(text)
+      .foregroundStyle(color)
+      .padding(.horizontal, 3)
+      .padding(.vertical, 1)
+      .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 3))
   }
 }
 
@@ -693,6 +751,10 @@ private struct PredictionBanner: View {
   }
 
   private static func range(_ earliest: Date, _ latest: Date) -> String {
+    if latest.timeIntervalSince(earliest) >= 24 * 60 * 60 {
+      return earliest.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+        + "–" + latest.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+    }
     let calendar = Calendar.autoupdatingCurrent
     let relativeDay: String
     if calendar.isDateInToday(earliest) {

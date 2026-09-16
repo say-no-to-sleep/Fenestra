@@ -12,8 +12,16 @@ cat > "${temporary}"
 mv "${temporary}" "${destination}"
 trap - EXIT HUP INT TERM
 
+# Statusline text is cosmetic — never fail the hook over it, or Claude Code
+# renders an error instead of a status line.
 if command -v jq >/dev/null 2>&1; then
-  jq -r '"\(.model.display_name // "Claude") · \(.context_window.used_percentage // 0)% ctx"' "${destination}"
+  jq -r '
+    [ (.model.display_name // "Claude"),
+      (.rate_limits.five_hour.used_percentage | select(. != null) | "5h \(.|round)%"),
+      (.rate_limits.seven_day.used_percentage | select(. != null) | "7d \(.|round)%"),
+      (.context_window.used_percentage        | select(. != null) | "\(.|round)% ctx")
+    ] | join(" · ")
+  ' "${destination}" 2>/dev/null || printf 'Claude\n'
 else
   printf 'Claude\n'
 fi

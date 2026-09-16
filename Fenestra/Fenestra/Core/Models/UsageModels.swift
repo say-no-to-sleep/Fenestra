@@ -157,6 +157,8 @@ struct UsageWindowSnapshot: Codable, Equatable, Identifiable, Sendable {
   // nil when no token data is available (e.g. non-Claude providers, or no CLI usage).
   var tokensUsed: Double? = nil
 
+  nonisolated var isSupplementary: Bool { id.hasPrefix("codex-extra-") }
+
   nonisolated var hasKnownTimeline: Bool {
     guard let windowStart, let windowEnd else { return false }
     return windowEnd > windowStart
@@ -181,6 +183,21 @@ struct UsageSnapshot: Codable, Equatable, Identifiable, Sendable {
   let accountDescription: String?
   var planDescription: String? = nil
   let notes: [String]
+
+  var mainWindows: [UsageWindowSnapshot] {
+    pools.flatMap(\.windows).filter { !$0.isSupplementary }
+  }
+
+  var displayPlan: String? {
+    guard let planDescription else { return nil }
+    switch planDescription.lowercased() {
+    case "prolite": return "Pro Lite"
+    case "pro": return "Pro"
+    case "plus": return "Plus"
+    case "free": return "Free"
+    default: return planDescription
+    }
+  }
 }
 
 struct HistoryPoint: Codable, Equatable, Identifiable, Sendable {
@@ -309,6 +326,12 @@ struct HistoricalUsageWindow: Codable, Equatable, Identifiable, Sendable {
     }
   }
 
+  var outcomeLabel: String {
+    if exhaustedAt != nil { return "Exhausted" }
+    guard let last = samples.last, last.timestamp >= end else { return "Outcome unknown" }
+    return "Quota left at reset"
+  }
+
   var exhaustedAt: Date? {
     samples.first(where: { $0.remainingPercent <= 0 })?.timestamp
   }
@@ -396,6 +419,7 @@ struct UrgentQuotaSummary: Equatable, Sendable {
   let paceDelta: Double?
   let prediction: ExhaustionPrediction?
   let reset: Date?
+  let windowKind: UsageWindowKind
 }
 
 struct StoredUsageWindow: Codable, Equatable, Identifiable, Sendable {
@@ -431,9 +455,10 @@ struct PaceEvaluation: Equatable, Sendable {
 
   var label: String {
     let amount = abs(delta).rounded()
+    guard amount > 0 else { return "On pace" }
     return delta < 0
-      ? "\(amount.formatted(.number.precision(.fractionLength(0))))% over pace"
-      : "\(amount.formatted(.number.precision(.fractionLength(0))))% under pace"
+      ? "\(amount.formatted(.number.precision(.fractionLength(0)))) pp over pace"
+      : "\(amount.formatted(.number.precision(.fractionLength(0)))) pp under pace"
   }
 }
 
@@ -447,4 +472,12 @@ enum ProviderAvailability: Equatable, Sendable {
 struct ProviderDisplayState: Equatable, Sendable {
   var snapshot: UsageSnapshot?
   var availability: ProviderAvailability = .idle
+
+  func isStale(at date: Date, cadence: TimeInterval?) -> Bool {
+    guard let snapshot else { return true }
+    if case .unavailable = availability { return true }
+    let maximumAge = max(5 * 60, (cadence ?? 15 * 60) * 2)
+    return date.timeIntervalSince(snapshot.freshness) > maximumAge
+      || snapshot.mainWindows.contains { $0.windowEnd.map { $0 <= date } ?? false }
+  }
 }

@@ -66,6 +66,13 @@ final class AppSettings {
   var expandedPopover = true { didSet { changed() } }
   var personalizedForecastingEnabled = true { didSet { changed() } }
 
+  var lastSelectedProvider: ProviderID = .claudeCode {
+    didSet {
+      guard hasLoaded, lastSelectedProvider != oldValue else { return }
+      defaults.set(lastSelectedProvider.rawValue, forKey: Keys.lastSelectedProvider)
+    }
+  }
+
   var paceTheme: PaceTheme {
     PaceTheme.palette(for: paceThemeStyle)
   }
@@ -152,6 +159,11 @@ final class AppSettings {
     expandedPopover = defaults.object(forKey: Keys.expandedPopover) as? Bool ?? true
     personalizedForecastingEnabled =
       defaults.object(forKey: Keys.personalizedForecastingEnabled) as? Bool ?? true
+    if let raw = defaults.string(forKey: Keys.lastSelectedProvider),
+      let providerID = ProviderID(rawValue: raw)
+    {
+      lastSelectedProvider = providerID
+    }
     hasLoaded = true
   }
 
@@ -376,5 +388,6 @@ final class AppSettings {
     static let paceThemeStyle = "general.paceThemeStyle"
     static let expandedPopover = "general.expandedPopover"
     static let personalizedForecastingEnabled = "forecast.personalizedEnabled"
+    static let lastSelectedProvider = "general.lastSelectedProvider"
   }
 }

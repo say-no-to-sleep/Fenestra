@@ -1,10 +1,31 @@
 import Foundation
 import Observation
 
+struct HistorySeriesKey: Hashable, Sendable {
+  let providerID: ProviderID
+  let poolID: String
+  let windowID: String
+
+  init(_ providerID: ProviderID, _ poolID: String, _ windowID: String) {
+    self.providerID = providerID
+    self.poolID = poolID
+    self.windowID = windowID
+  }
+
+  init(_ point: HistoryPoint) {
+    self.init(point.providerID, point.poolID, point.windowID)
+  }
+}
+
 @Observable
 @MainActor
 final class HistoryStore {
   private(set) var points: [HistoryPoint] = []
+
+  /// Menu-bar pace math reads a single series on every SwiftUI invalidation, and a flat
+  /// scan of ~50k points several times per redraw is what makes the popover beachball.
+  /// Kept in step with ``points`` by ``setPoints(_:)`` and ``append(_:)``.
+  @ObservationIgnored private var pointsBySeries: [HistorySeriesKey: [HistoryPoint]] = [:]
   private(set) var activeRegimes: [ProviderID: SubscriptionRegime] = [:]
   private(set) var activeAnomalies: [UsageAnomaly] = []
   private(set) var profileChangeSuggestions: Set<ProviderID> = []
@@ -29,8 +50,10 @@ final class HistoryStore {
       try await database.prepare()
       try await database.importLegacyJSONIfNeeded(from: legacyFileURL)
       try await database.prune(now: now)
-      points = try await database.loadRecentPoints(
-        since: now.addingTimeInterval(-memoryRetention)
+      setPoints(
+        try await database.loadRecentPoints(
+          since: now.addingTimeInterval(-memoryRetention)
+        )
       )
       for providerID in ProviderID.allCases {
         if let regime = try await database.activeRegime(providerID: providerID) {
@@ -76,7 +99,12 @@ final class HistoryStore {
     }
     if !newPoints.isEmpty {
       points.append(contentsOf: newPoints)
-      _ = pruneMemory(now: snapshot.freshness)
+      for point in newPoints {
+        pointsBySeries[HistorySeriesKey(point), default: []].append(point)
+      }
+      if pruneMemory(now: snapshot.freshness) {
+        rebuildSeriesIndex()
+      }
     }
 
     guard databaseAvailable else {
@@ -113,14 +141,9 @@ final class HistoryStore {
     windowID: String,
     since: Date? = nil
   ) -> [HistoryPoint] {
-    points.filter {
-      guard $0.providerID == providerID,
-        $0.poolID == poolID,
-        $0.windowID == windowID
-      else { return false }
-      guard let since else { return true }
-      return $0.timestamp >= since
-    }
+    let series = pointsBySeries[HistorySeriesKey(providerID, poolID, windowID)] ?? []
+    guard let since else { return series }
+    return series.filter { $0.timestamp >= since }
   }
 
   func recentPoints(
@@ -200,7 +223,7 @@ final class HistoryStore {
   }
 
   func clearAll() async {
-    points = []
+    setPoints([])
     activeRegimes = [:]
     activeAnomalies = []
     profileChangeSuggestions = []
@@ -279,17 +302,23 @@ final class HistoryStore {
     )
   }
 
-  func dailyActivity(providerID: ProviderID? = nil, days: Int = 90) -> [DailyActivity] {
+  func dailyActivity(providerID: ProviderID? = nil, poolID: String? = nil,
+                     windowID: String? = nil, days: Int = 90) -> [DailyActivity] {
     let calendar = Calendar.autoupdatingCurrent
     let cutoff = calendar.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
     let filtered = points
-      .filter { $0.timestamp >= cutoff && (providerID == nil || $0.providerID == providerID) }
+      .filter { $0.timestamp >= cutoff && (providerID == nil || $0.providerID == providerID)
+        && (poolID == nil || $0.poolID == poolID) && (windowID == nil || $0.windowID == windowID) }
       .sorted { $0.timestamp < $1.timestamp }
     var totals: [Date: Double] = [:]
     var previousByWindow: [String: HistoryPoint] = [:]
     for point in filtered {
       let key = "\(point.providerID.rawValue)|\(point.poolID)|\(point.windowID)"
-      if let previous = previousByWindow[key] {
+      if let previous = previousByWindow[key],
+        previous.windowInstanceID == point.windowInstanceID,
+        previous.regimeID == point.regimeID,
+        calendar.isDate(previous.timestamp, inSameDayAs: point.timestamp)
+      {
         totals[calendar.startOfDay(for: point.timestamp), default: 0] +=
           max(0, previous.remainingPercent - point.remainingPercent)
       }
@@ -299,12 +328,14 @@ final class HistoryStore {
       .sorted { $0.date < $1.date }
   }
 
-  func dailyWorstPace(providerID: ProviderID? = nil, days: Int = 90) -> [DailyPace] {
+  func dailyWorstPace(providerID: ProviderID? = nil, poolID: String? = nil,
+                      windowID: String? = nil, days: Int = 90) -> [DailyPace] {
     let calendar = Calendar.autoupdatingCurrent
     let cutoff = calendar.date(byAdding: .day, value: -days, to: Date()) ?? .distantPast
     var values: [Date: Double] = [:]
     for point in points where point.timestamp >= cutoff
       && (providerID == nil || point.providerID == providerID)
+      && (poolID == nil || point.poolID == poolID) && (windowID == nil || point.windowID == windowID)
     {
       guard let delta = point.paceDelta else { continue }
       let day = calendar.startOfDay(for: point.timestamp)
@@ -321,11 +352,19 @@ final class HistoryStore {
     timestamp: Date,
     remainingPercent: Double
   ) -> Bool {
-    guard let last = points.last(where: {
-      $0.providerID == providerID && $0.poolID == poolID && $0.windowID == windowID
-    }) else { return true }
+    guard let last = pointsBySeries[HistorySeriesKey(providerID, poolID, windowID)]?.last
+    else { return true }
     return timestamp.timeIntervalSince(last.timestamp) >= minimumSampleInterval
       || abs(remainingPercent - last.remainingPercent) >= significantChange
+  }
+
+  private func setPoints(_ newValue: [HistoryPoint]) {
+    points = newValue
+    rebuildSeriesIndex()
+  }
+
+  private func rebuildSeriesIndex() {
+    pointsBySeries = Dictionary(grouping: points, by: HistorySeriesKey.init)
   }
 
   @discardableResult
@@ -345,6 +384,7 @@ final class HistoryStore {
       LocalLog.record("History load failed: \(error.localizedDescription)")
     }
     _ = pruneMemory(now: now)
+    rebuildSeriesIndex()
   }
 
   private func persistLegacy() {

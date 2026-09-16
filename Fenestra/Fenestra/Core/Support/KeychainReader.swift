@@ -72,6 +72,38 @@ enum KeychainReader {
     }
   }
 
+  static func updateGenericPassword(
+    service: String,
+    account: String? = nil,
+    data: Data
+  ) throws {
+    invalidate(service: service, account: account)
+    var query: [String: Any] = [
+      kSecClass as String: kSecClassGenericPassword,
+      kSecAttrService as String: service,
+    ]
+    if let account {
+      query[kSecAttrAccount as String] = account
+    }
+    let status = SecItemUpdate(
+      query as CFDictionary,
+      [kSecValueData as String: data] as CFDictionary
+    )
+    switch status {
+    case errSecSuccess:
+      cache[CacheKey(service: service, account: account)] = .value(data)
+    case errSecItemNotFound:
+      throw ProviderFailure.unavailable("Keychain item missing")
+    case errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed:
+      throw ProviderFailure.unavailable("Keychain access requires approval")
+    default:
+      let message =
+        "Keychain update failed "
+        + "(\(SecCopyErrorMessageString(status, nil) as String? ?? "\(status)"))"
+      throw ProviderFailure.unavailable(message)
+    }
+  }
+
   static func invalidate(service: String, account: String? = nil) {
     cache.removeValue(forKey: CacheKey(service: service, account: account))
   }

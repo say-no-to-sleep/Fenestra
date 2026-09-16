@@ -2,13 +2,12 @@ import Foundation
 
 /// Fenestra has no analytics, telemetry, crash reporting, or cloud sync.
 /// Requests and redirects are rejected unless they target a provider endpoint
-/// explicitly used by Claude Code, Codex, Antigravity, or Cursor.
+/// explicitly used by Claude Code, Codex, or Cursor.
 enum RestrictedHTTPClient {
   nonisolated private static let remoteHosts: Set<String> = [
     "api.anthropic.com",
+    "platform.claude.com",
     "chatgpt.com",
-    "daily-cloudcode-pa.googleapis.com",
-    "cloudcode-pa.googleapis.com",
     "cursor.com",
     "www.cursor.com",
   ]

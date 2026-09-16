@@ -43,8 +43,10 @@ enum ClaudeStatuslineReader {
 
   private static func usedPercent(_ object: [String: Any]?) -> Double? {
     guard let object else { return nil }
+    // Claude Code ≥2.1 emits `used_percentage`; the others are older/aliased spellings.
     let value =
-      object["utilization"]
+      object["used_percentage"]
+      ?? object["utilization"]
       ?? object["used_percent"]
       ?? object["usedPercent"]
     guard let number = value as? NSNumber,

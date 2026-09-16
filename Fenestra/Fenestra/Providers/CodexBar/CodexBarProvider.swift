@@ -37,9 +37,9 @@ final class CodexBarProvider: UsageProvider {
     let context = ProviderFetchContext(
       runtime: .app,
       sourceMode: connectionConfiguration.source.codexBarValue,
-      includeCredits: true,
-      includeOptionalUsage: true,
-      webTimeout: 60,
+      includeCredits: false,
+      includeOptionalUsage: false,
+      webTimeout: 15,
       webDebugDumpHTML: false,
       verbose: false,
       env: environment,

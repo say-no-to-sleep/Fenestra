@@ -34,6 +34,16 @@ the first time if Gatekeeper asks.
 - One year of local usage history with previous-window browsing and comparison
 - Reset timeline, anomaly detection, and provider reliability health
 
+The dashboard opens directly to quota charts without page tabs. The menu bar
+and compact view summarize the selected provider's main quota. Browse previous
+windows using each card's history controls; uncertain outcomes are marked as
+unknown. Additional Codex model quotas can be expanded beneath the main quota.
+Drag a box on a pace chart to zoom time and remaining quota together; a
+horizontal drag zooms only time. Reset view or Esc restores both axes.
+
+Stale readings carry a warning and are excluded from headroom comparisons.
+Recommendations compare each provider's tightest main quota with a known reset.
+
 Fenestra does not invent reset anchors. A chart is rendered only when the
 provider supplies enough data to establish its timeline. Otherwise the panel
 explicitly says `Reset time unknown`.

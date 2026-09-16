@@ -2,16 +2,24 @@ import Foundation
 
 struct ClaudeUsageRateLimitGate {
   static let defaultCooldown: TimeInterval = 5 * 60
+  /// The OAuth token endpoint rate-limits per IP, not per account, and it does so
+  /// far more aggressively than the usage API. A retry loop there locks out every
+  /// Claude client on the machine — including the CLI — so back off hard.
+  static let tokenRefreshCooldown: TimeInterval = 30 * 60
+  static let tokenRefreshBlockedUntilKey = "providers.claude.oauthRefreshBlockedUntil"
 
   private let defaults: UserDefaults
   private let blockedUntilKey: String
+  private let cooldown: TimeInterval
 
   init(
     defaults: UserDefaults = .standard,
-    blockedUntilKey: String = "providers.claude.oauthUsageBlockedUntil"
+    blockedUntilKey: String = "providers.claude.oauthUsageBlockedUntil",
+    cooldown: TimeInterval = defaultCooldown
   ) {
     self.defaults = defaults
     self.blockedUntilKey = blockedUntilKey
+    self.cooldown = cooldown
   }
 
   func blockedUntil(now: Date = Date()) -> Date? {
@@ -32,7 +40,7 @@ struct ClaudeUsageRateLimitGate {
       if let retryAfter, retryAfter > now {
         retryAfter
       } else {
-        now.addingTimeInterval(Self.defaultCooldown)
+        now.addingTimeInterval(cooldown)
       }
     defaults.set(blockedUntil.timeIntervalSince1970, forKey: blockedUntilKey)
     return blockedUntil
@@ -68,8 +76,8 @@ struct ClaudeUsageRateLimitGate {
     return formatter.date(from: value)
   }
 
-  static func message(blockedUntil: Date) -> String {
+  static func message(blockedUntil: Date, subject: String = "usage API") -> String {
     let retryTime = blockedUntil.formatted(date: .omitted, time: .shortened)
-    return "Claude: usage API rate limited — retry after \(retryTime)"
+    return "Claude: \(subject) rate limited — retry after \(retryTime)"
   }
 }

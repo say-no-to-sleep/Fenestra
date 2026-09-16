@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ProviderDashboardContent: View {
   let snapshot: UsageSnapshot
+  var isRefreshing: Bool = false
   let errorMessage: String?
   let store: FenestraStore
   let onContentHeightChange: (CGFloat) -> Void
@@ -9,9 +10,12 @@ struct ProviderDashboardContent: View {
   var body: some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 12) {
-        FreshnessLine(snapshot: snapshot)
-        if let errorMessage {
-          StaleDataBanner(message: errorMessage)
+        FreshnessLine(snapshot: snapshot, isRefreshing: isRefreshing)
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+          if store.isStale(snapshot.providerID, at: context.date) {
+            StaleDataBanner(message: errorMessage ?? "Showing saved usage. Refresh to check current limits.",
+                            providerID: snapshot.providerID, store: store)
+          }
         }
         if snapshot.providerID == .antigravity {
           AntigravityPoolsView(snapshot: snapshot, store: store)
@@ -33,6 +37,7 @@ struct ProviderDashboardContent: View {
 
 private struct FreshnessLine: View {
   let snapshot: UsageSnapshot
+  var isRefreshing: Bool = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
@@ -41,8 +46,15 @@ private struct FreshnessLine: View {
         Text(snapshot.freshness, style: .relative)
         Text("·")
         Text("Source: \(snapshot.sourceDescription)")
+        if isRefreshing {
+          Text("·")
+          ProgressView()
+            .controlSize(.mini)
+          Text("Refreshing…")
+            .foregroundStyle(.secondary)
+        }
       }
-      if let plan = snapshot.planDescription, !plan.isEmpty {
+      if let plan = snapshot.displayPlan, !plan.isEmpty {
         Text(plan)
           .lineLimit(2)
       }
@@ -55,11 +67,24 @@ private struct FreshnessLine: View {
 
 private struct StaleDataBanner: View {
   let message: String
+  let providerID: ProviderID
+  let store: FenestraStore
+  @Environment(\.openSettings) private var openSettings
 
   var body: some View {
-    Label(message, systemImage: "exclamationmark.triangle.fill")
+    VStack(alignment: .leading, spacing: 8) {
+      Label(message, systemImage: "exclamationmark.triangle.fill")
       .font(.caption)
       .foregroundStyle(.orange)
+      HStack {
+        Button("Retry") { Task { await store.refresh(providerID, force: true) } }
+        Button("Connection settings") {
+          store.providerToConfigure = providerID
+          SettingsPresentation.open(using: openSettings)
+        }
+      }
+      .controlSize(.small)
+    }
       .padding(.horizontal, 10)
       .padding(.vertical, 6)
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -116,7 +141,20 @@ private struct PoolColumn: View {
         Text(pool.name)
           .font(.headline)
       }
-      ForEach(pool.windows) { window in
+      ForEach(pool.windows.filter { !$0.isSupplementary }) { window in
+        browser(window)
+      }
+      let supplementary = pool.windows.filter(\.isSupplementary)
+      if !supplementary.isEmpty {
+        DisclosureGroup("Additional model quotas (\(supplementary.count))") {
+          ForEach(supplementary) { window in browser(window) }
+        }
+        .font(.callout)
+      }
+    }
+  }
+
+  private func browser(_ window: UsageWindowSnapshot) -> some View {
         HistoricalWindowBrowser(
           providerID: snapshot.providerID,
           pool: pool,
@@ -134,10 +172,9 @@ private struct PoolColumn: View {
             window: window,
             at: snapshot.freshness
           ),
-          historyStore: store.history
+          historyStore: store.history,
+          isStale: store.isStale(snapshot.providerID)
         )
-      }
-    }
   }
 }
 

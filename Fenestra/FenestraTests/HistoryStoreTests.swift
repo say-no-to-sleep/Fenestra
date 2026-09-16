@@ -26,6 +26,44 @@ struct HistoryStoreTests {
     #expect(store.points.count == 3)
   }
 
+  /// The per-series index backs every menu-bar read, so it drifting out of step with
+  /// the flat array would silently feed stale pace math to the UI.
+  @Test
+  func seriesIndexStaysInStepWithFlatPoints() async {
+    let directory = FileManager.default.temporaryDirectory
+      .appending(path: "fenestra-history-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let fileURL = directory.appending(path: "history.json")
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    let store = HistoryStore(fileURL: fileURL)
+    let start = Date(timeIntervalSince1970: 1_800_000_000)
+    for step in 0..<5 {
+      await store.append(
+        snapshot(at: start.addingTimeInterval(Double(step) * 12 * 60), remaining: 90 - Double(step))
+      )
+    }
+
+    let indexed = store.points(providerID: .claudeCode, poolID: "default", windowID: "five-hour")
+    #expect(indexed == store.points)
+
+    let since = start.addingTimeInterval(24 * 60)
+    let recent = store.points(
+      providerID: .claudeCode,
+      poolID: "default",
+      windowID: "five-hour",
+      since: since
+    )
+    #expect(recent == store.points.filter { $0.timestamp >= since })
+    #expect(recent.count == 3)
+
+    // Series that were never recorded must come back empty, not fall through to everything.
+    #expect(store.points(providerID: .codex, poolID: "default", windowID: "five-hour").isEmpty)
+    #expect(store.points(providerID: .claudeCode, poolID: "default", windowID: "weekly").isEmpty)
+
+    await store.clearAll()
+    #expect(store.points(providerID: .claudeCode, poolID: "default", windowID: "five-hour").isEmpty)
+  }
+
   private func snapshot(at date: Date, remaining: Double) -> UsageSnapshot {
     UsageSnapshot(
       providerID: .claudeCode,

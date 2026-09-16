@@ -9,6 +9,7 @@ struct HistoricalWindowBrowser: View {
   let currentHistory: [HistoryPoint]
   let evaluation: PaceEvaluation?
   let historyStore: HistoryStore
+  var isStale: Bool = false
 
   @State private var completed: [HistoricalUsageWindow] = []
   @State private var position = 0
@@ -47,7 +48,8 @@ struct HistoricalWindowBrowser: View {
           window: selectedSnapshot(selected),
           freshness: selected.samples.last?.timestamp ?? selected.end,
           history: selected.samples,
-          evaluation: nil
+          evaluation: nil,
+          embedded: true
         )
         HistoricalWindowStats(window: selected)
         Toggle("Compare with Current", isOn: $compareWithCurrent)
@@ -70,10 +72,13 @@ struct HistoricalWindowBrowser: View {
           window: window,
           freshness: freshness,
           history: currentHistory,
-          evaluation: evaluation
+          evaluation: isStale ? nil : evaluation,
+          embedded: true
         )
       }
     }
+    .padding(12)
+    .background { RoundedRectangle(cornerRadius: 12).fill(.quaternary.opacity(0.45)) }
     .task(
       id: "\(providerID.rawValue)|\(pool.id)|\(window.id)|\(includeOtherPlans)|\(activeRegimeID)"
     ) {
@@ -122,7 +127,7 @@ private struct HistoricalWindowStats: View {
         stat("Peak burn", "\(window.peakBurnPerHour.formatted(.number.precision(.fractionLength(1)))) points/hr")
       }
       GridRow {
-        stat("Result", window.exhaustedAt == nil ? "Reset with quota left" : "Exhausted")
+        stat("Result", window.outcomeLabel)
         stat("Coverage", "\((window.observationCoverage * 100).formatted(.number.precision(.fractionLength(0))))%")
       }
       GridRow {

@@ -139,23 +139,21 @@ final class CursorProvider: UsageProvider {
       breakdown: breakdown
     )
 
-    let windows = [
-      CursorUsageResolver.monthlyWindow(
-        usage: meter,
-        start: billing.start,
-        end: billing.end,
-        breakdown: breakdown
-      )
-    ]
+    let pools = CursorUsageResolver.pools(
+      usage: meter,
+      start: billing.start,
+      end: billing.end,
+      breakdown: breakdown
+    )
 
     var notes = [meter.unitNote]
-    if !windows.contains(where: \.hasKnownTimeline) {
+    if !pools.contains(where: { $0.windows.contains(where: \.hasKnownTimeline) }) {
       notes.append("Billing reset unknown")
     }
     return UsageSnapshot(
       providerID: .cursor,
       displayName: displayName,
-      pools: [UsagePoolSnapshot(id: "included", name: "Included", windows: windows)],
+      pools: pools,
       freshness: freshness,
       sourceDescription: session.source,
       cacheHitRate: nil,

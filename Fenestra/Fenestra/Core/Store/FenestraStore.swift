@@ -34,6 +34,7 @@ final class FenestraStore {
   )
   private(set) var healthSummaries: [ProviderID: ProviderHealthSummary] = [:]
   var selectedProvider: ProviderID = .claudeCode
+  var providerToConfigure: ProviderID?
 
   @ObservationIgnored private let notificationManager = NotificationManager()
   @ObservationIgnored private var providers: [ProviderID: any UsageProvider] = [:]
@@ -56,6 +57,10 @@ final class FenestraStore {
     hasStarted = true
 
     settings.load()
+    if settings.isEnabled(settings.lastSelectedProvider) {
+      selectedProvider = settings.lastSelectedProvider
+      userSelectedProvider = true
+    }
     await history.loadAndPrune()
     configureProviders()
     restartClaudeProjectsWatcher()
@@ -77,6 +82,7 @@ final class FenestraStore {
   func select(_ providerID: ProviderID) {
     selectedProvider = providerID
     userSelectedProvider = true
+    settings.lastSelectedProvider = providerID
   }
 
   func refreshAll() async {
@@ -127,12 +133,12 @@ final class FenestraStore {
       let snapshot = try await ProviderInteractionContext.$current.withValue(interaction) {
         try await provider.currentSnapshot()
       }
-      await history.append(snapshot)
-      await updatePersonalizedPredictions(snapshot: snapshot)
       states[providerID] = ProviderDisplayState(
         snapshot: snapshot,
         availability: .available
       )
+      await history.append(snapshot)
+      await updatePersonalizedPredictions(snapshot: snapshot)
       let anomalies = anomalyDetector.evaluate(
         snapshot: snapshot,
         history: history.points,
@@ -272,30 +278,67 @@ final class FenestraStore {
     )
   }
 
-  var urgentQuota: UrgentQuotaSummary? {
-    let candidates = settings.enabledProviders.flatMap { providerID -> [UrgentQuotaSummary] in
-      guard let snapshot = states[providerID]?.snapshot else { return [] }
-      return snapshot.pools.flatMap { pool in
-        pool.windows.map { window in
-          let evaluation = paceEvaluation(
-            providerID: providerID,
-            pool: pool,
-            window: window,
-            at: snapshot.freshness
-          )
-          return UrgentQuotaSummary(
-            providerID: providerID,
-            poolName: pool.name,
-            windowName: window.label,
-            remainingPercent: window.remainingPercent,
-            paceDelta: evaluation?.delta,
-            prediction: evaluation?.exhaustionPrediction,
-            reset: window.windowEnd
-          )
-        }
-      }
+  /// The selected provider's shortest window, preferring main Codex limits
+  /// over separate model quotas such as Spark.
+  var selectedMenuQuota: UrgentQuotaSummary? {
+    guard settings.isEnabled(selectedProvider),
+      let snapshot = states[selectedProvider]?.snapshot
+    else {
+      return nil
     }
-    return candidates.max { urgencyScore($0) < urgencyScore($1) }
+    let candidates = snapshot.pools.flatMap { pool in pool.windows.map { (pool, $0) } }
+    // min(by:) keeps the first of equal-ranked windows, preserving provider window order.
+    guard
+      let (pool, window) = candidates.min(by: {
+        Self.menuWindowRank($0.1) < Self.menuWindowRank($1.1)
+      })
+    else {
+      return nil
+    }
+    let evaluation = paceEvaluation(
+      providerID: selectedProvider,
+      pool: pool,
+      window: window,
+      at: snapshot.freshness
+    )
+    return UrgentQuotaSummary(
+      providerID: selectedProvider,
+      poolName: pool.name,
+      windowName: window.label,
+      remainingPercent: window.remainingPercent,
+      paceDelta: evaluation?.delta,
+      prediction: evaluation?.exhaustionPrediction,
+      reset: window.windowEnd,
+      windowKind: window.kind
+    )
+  }
+
+  var selectedMenuUrgency: PaceUrgency {
+    Self.urgency(delta: selectedMenuQuota?.paceDelta)
+  }
+
+  /// Main Codex limits precede extra model quotas. Within each group, measured
+  /// windows sort by duration; the rest fall back to 5-hour, weekly, then monthly.
+  nonisolated static func menuWindowRank(_ window: UsageWindowSnapshot) -> (Int, Int, Double) {
+    let modelQuota = window.isSupplementary ? 1 : 0
+    if window.hasKnownTimeline, let start = window.windowStart, let end = window.windowEnd {
+      return (modelQuota, 0, end.timeIntervalSince(start))
+    }
+    let fallback: Double =
+      switch window.kind {
+      case .fiveHour: 0
+      case .weekly: 1
+      case .monthly: 2
+      case .other: 3
+      }
+    return (modelQuota, 1, fallback)
+  }
+
+  private static func urgency(delta: Double?) -> PaceUrgency {
+    guard let delta else { return .unknown }
+    if delta < -25 { return .critical }
+    if delta < -10 { return .warning }
+    return .good
   }
 
   var resetTimeline: [ResetTimelineItem] {
@@ -322,22 +365,42 @@ final class FenestraStore {
   }
 
   var urgency: PaceUrgency {
-    guard let worst = allPaceDeltas().map(\.delta).min() else { return .unknown }
-    if worst < -25 { return .critical }
-    if worst < -10 { return .warning }
-    return .good
+    Self.urgency(delta: allPaceDeltas().map(\.delta).min())
+  }
+
+  func isStale(_ providerID: ProviderID, at date: Date = .now) -> Bool {
+    state(for: providerID).isStale(at: date, cadence: settings.cadence(for: providerID).duration)
+  }
+
+  /// A provider is only as usable as its tightest main quota; model extras are separate.
+  static func limitingPace(_ snapshot: UsageSnapshot, at date: Date) -> Double? {
+    let windows = snapshot.mainWindows
+    guard !windows.isEmpty else { return nil }
+    var deltas: [Double] = []
+    for window in windows {
+      guard window.remainingPercent > 0,
+        let start = window.windowStart, let end = window.windowEnd,
+        start <= date, date < end,
+        let delta = PaceCalculator.delta(remainingPercent: window.remainingPercent,
+                                        at: snapshot.freshness, windowStart: start, windowEnd: end)
+      else { return nil }
+      deltas.append(delta)
+    }
+    return deltas.min()
   }
 
   var smartSuggestion: String {
-    let deltas = allPaceDeltas()
-    guard !deltas.isEmpty else { return "Pace unknown" }
-    if deltas.allSatisfy({ $0.delta < -10 }) {
-      return "Everything’s tight"
+    let now = Date()
+    let candidates = settings.enabledProviders.compactMap { provider -> (ProviderID, Double)? in
+      guard !isStale(provider, at: now), let snapshot = states[provider]?.snapshot,
+        let delta = Self.limitingPace(snapshot, at: now)
+      else { return nil }
+      return (provider, delta)
     }
-    guard let best = deltas.max(by: { $0.delta < $1.delta }) else {
-      return "Pace unknown"
-    }
-    return "\(best.providerID.displayName) has most headroom"
+    guard candidates.count >= 2 else { return "Not enough fresh quotas to compare" }
+    guard let best = candidates.max(by: { $0.1 < $1.1 }) else { return "Pace unknown" }
+    if best.1 < -10 { return "Main quotas are running over pace" }
+    return "\(best.0.displayName) has the most main-quota headroom"
   }
 
   func historyPoints(
@@ -596,21 +659,6 @@ final class FenestraStore {
 
   private func predictionKey(providerID: ProviderID, poolID: String, windowID: String) -> String {
     "\(providerID.rawValue)|\(poolID)|\(windowID)"
-  }
-
-  private func urgencyScore(_ quota: UrgentQuotaSummary) -> Double {
-    let validatedRisk: Double
-    if let prediction = quota.prediction,
-      prediction.notificationEligible,
-      let reset = quota.reset,
-      let likely = prediction.likely,
-      likely < reset
-    {
-      validatedRisk = 10_000 + (prediction.exhaustionProbability ?? 1) * 1_000
-    } else {
-      validatedRisk = 0
-    }
-    return validatedRisk + max(0, -(quota.paceDelta ?? 0)) * 10 + (100 - quota.remainingPercent)
   }
 
   private static func failureCategory(_ error: Error) -> RefreshFailureCategory {

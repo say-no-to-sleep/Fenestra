@@ -678,11 +678,16 @@ actor HistoryDatabase {
   }
 
   private func updateCoverage(providerID: ProviderID, now: Date) throws {
+    let recentCutoff = now.addingTimeInterval(-24 * 60 * 60)
     let instances: [(UUID, Date, Date)] = try withStatement(
-      "SELECT id, start, end FROM window_instances WHERE provider = ? AND end <= ?"
+      """
+      SELECT id, start, end FROM window_instances
+      WHERE provider = ? AND end <= ? AND (coverage = 0 OR end >= ?)
+      """
     ) { statement in
       bind(providerID.rawValue, to: 1, in: statement)
       bind(now.timeIntervalSince1970, to: 2, in: statement)
+      bind(recentCutoff.timeIntervalSince1970, to: 3, in: statement)
       var values: [(UUID, Date, Date)] = []
       while sqlite3_step(statement) == SQLITE_ROW {
         if let id = UUID(uuidString: text(statement, 0)) {
@@ -1170,10 +1175,14 @@ actor HistoryDatabase {
       ON usage_samples(provider, series_key, timestamp);
     CREATE INDEX IF NOT EXISTS idx_samples_regime_time
       ON usage_samples(regime_id, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_samples_window_instance
+      ON usage_samples(window_instance_id);
     CREATE INDEX IF NOT EXISTS idx_windows_series_end
       ON window_instances(provider, series_key, end);
     CREATE INDEX IF NOT EXISTS idx_windows_regime_end
       ON window_instances(regime_id, end);
+    CREATE INDEX IF NOT EXISTS idx_windows_provider_end_coverage
+      ON window_instances(provider, end, coverage);
     CREATE INDEX IF NOT EXISTS idx_regimes_provider_active
       ON regimes(provider, ended_at);
     CREATE INDEX IF NOT EXISTS idx_refresh_provider_time

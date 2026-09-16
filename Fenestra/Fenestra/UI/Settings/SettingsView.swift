@@ -3,30 +3,33 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
-  let store: FenestraStore
-  @State private var configuringProvider: ProviderID?
+  @Bindable var store: FenestraStore
+  @State private var selectedTab = "general"
   @State private var providerSearch = ""
 
   var body: some View {
-    TabView {
-      Tab("General", systemImage: "gear") {
+    TabView(selection: $selectedTab) {
+      Tab("General", systemImage: "gear", value: "general") {
         GeneralSettingsTab(store: store)
       }
-      Tab("Providers", systemImage: "square.grid.2x2") {
+      Tab("Providers", systemImage: "square.grid.2x2", value: "providers") {
         ProvidersSettingsTab(
           store: store,
           search: $providerSearch,
-          configure: { configuringProvider = $0 }
+          configure: { store.providerToConfigure = $0 }
         )
       }
-      Tab("Alerts", systemImage: "bell") {
+      Tab("Alerts", systemImage: "bell", value: "alerts") {
         AlertsSettingsTab(settings: store.settings)
       }
     }
     .scenePadding()
     .frame(width: 640, height: 680)
     .background(SettingsWindowLifecycle())
-    .sheet(item: $configuringProvider) { providerID in
+    .onChange(of: store.providerToConfigure, initial: true) {
+      if store.providerToConfigure != nil { selectedTab = "providers" }
+    }
+    .sheet(item: $store.providerToConfigure) { providerID in
       ProviderConnectionEditor(
         providerID: providerID,
         settings: store.settings
@@ -211,9 +214,10 @@ private struct AlertsSettingsTab: View {
         HStack {
           Text("Notify at")
           Slider(value: $settings.badPaceThresholdMagnitude, in: 5...75, step: 5)
-          Text("\(settings.badPaceThresholdMagnitude.formatted(.number.precision(.fractionLength(0))))% over pace")
+            .help("Percentage points below the even-spend target at which to notify you.")
+          Text("\(settings.badPaceThresholdMagnitude.formatted(.number.precision(.fractionLength(0)))) pp over pace")
             .monospacedDigit()
-            .frame(width: 118, alignment: .trailing)
+            .frame(width: 130, alignment: .trailing)
         }
       }
     }

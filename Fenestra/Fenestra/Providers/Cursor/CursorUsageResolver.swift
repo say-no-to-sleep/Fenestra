@@ -5,19 +5,62 @@ struct CursorResolvedUsage: Equatable {
   let used: Double
   let totalPercent: Double
   let unitNote: String
+  var modelsPercent: Double? = nil
+  var apiPercent: Double? = nil
 }
 
 enum CursorUsageResolver {
-  static func monthlyWindow(
+  static func pools(
+    usage: CursorResolvedUsage,
+    start: Date?,
+    end: Date?,
+    breakdown: [UsageBreakdownItem]
+  ) -> [UsagePoolSnapshot] {
+    var pools = [
+      UsagePoolSnapshot(
+        id: usage.modelsPercent == nil ? "included" : "cursor-models",
+        name: usage.modelsPercent == nil ? "Included" : "Cursor Models",
+        windows: [
+          includedWindow(
+            usage: usage,
+            start: start,
+            end: end,
+            breakdown: breakdown
+          )
+        ]
+      )
+    ]
+    if let apiPercent = usage.apiPercent {
+      pools.append(
+        UsagePoolSnapshot(
+          id: "cursor-api",
+          name: "Other Models",
+          windows: [apiWindow(percentUsed: apiPercent, start: start, end: end)]
+        )
+      )
+    }
+    return pools
+  }
+
+  static func includedWindow(
     usage: CursorResolvedUsage,
     start: Date?,
     end: Date?,
     breakdown: [UsageBreakdownItem]
   ) -> UsageWindowSnapshot {
-    UsageWindowSnapshot(
+    if let modelsPercent = usage.modelsPercent {
+      return percentWindow(
+        id: "cursor-models-monthly",
+        label: "Cursor Models",
+        percentUsed: modelsPercent,
+        start: start,
+        end: end
+      )
+    }
+    return UsageWindowSnapshot(
       id: "cursor-monthly-v2",
       kind: .monthly,
-      label: "Monthly",
+      label: "Included",
       windowStart: start,
       windowEnd: end,
       quotaTotal: usage.quotaTotal,
@@ -26,7 +69,44 @@ enum CursorUsageResolver {
       resetSource: end == nil ? nil : "Cursor billing data",
       breakdown: breakdown.filter {
         $0.id.caseInsensitiveCompare("total") != .orderedSame
+          && $0.id.caseInsensitiveCompare("api") != .orderedSame
+          && $0.id.caseInsensitiveCompare("auto") != .orderedSame
       }
+    )
+  }
+
+  static func apiWindow(
+    percentUsed: Double,
+    start: Date?,
+    end: Date?
+  ) -> UsageWindowSnapshot {
+    percentWindow(
+      id: "cursor-api-monthly",
+      label: "Other Models",
+      percentUsed: percentUsed,
+      start: start,
+      end: end
+    )
+  }
+
+  private static func percentWindow(
+    id: String,
+    label: String,
+    percentUsed: Double,
+    start: Date?,
+    end: Date?
+  ) -> UsageWindowSnapshot {
+    UsageWindowSnapshot(
+      id: id,
+      kind: .monthly,
+      label: label,
+      windowStart: start,
+      windowEnd: end,
+      quotaTotal: 100,
+      used: min(100, max(0, percentUsed)),
+      remainingPercent: max(0, 100 - percentUsed),
+      resetSource: end == nil ? nil : "Cursor billing data",
+      breakdown: []
     )
   }
 
@@ -44,7 +124,8 @@ enum CursorUsageResolver {
         quotaTotal: Double(requestLimit),
         used: used,
         totalPercent: used / Double(requestLimit) * 100,
-        unitNote: "\(Int(used))/\(requestLimit) requests"
+        unitNote: "\(Int(used))/\(requestLimit) requests",
+        apiPercent: nil
       )
     }
 
@@ -93,7 +174,23 @@ enum CursorUsageResolver {
       quotaTotal: normalizedQuota,
       used: used,
       totalPercent: totalPercent,
-      unitNote: unitNote
+      unitNote: unitNote,
+      modelsPercent: percent(plan?.autoPercentUsed, breakdownID: "auto", breakdown: breakdown),
+      apiPercent: percent(plan?.apiPercentUsed, breakdownID: "api", breakdown: breakdown)
     )
+  }
+
+  private static func percent(
+    _ planValue: Double?,
+    breakdownID: String,
+    breakdown: [UsageBreakdownItem]
+  ) -> Double? {
+    let raw =
+      planValue
+      ?? breakdown.first(where: {
+        $0.id.caseInsensitiveCompare(breakdownID) == .orderedSame
+      })?.usedPercent
+    guard let raw, raw.isFinite, raw >= 0 else { return nil }
+    return raw
   }
 }

@@ -16,6 +16,22 @@ struct CursorPlanUsage: Decodable {
   let used: Double?
   let limit: Double?
   let totalPercentUsed: Double?
+  let autoPercentUsed: Double?
+  let apiPercentUsed: Double?
+
+  init(
+    used: Double? = nil,
+    limit: Double? = nil,
+    totalPercentUsed: Double? = nil,
+    autoPercentUsed: Double? = nil,
+    apiPercentUsed: Double? = nil
+  ) {
+    self.used = used
+    self.limit = limit
+    self.totalPercentUsed = totalPercentUsed
+    self.autoPercentUsed = autoPercentUsed
+    self.apiPercentUsed = apiPercentUsed
+  }
 }
 
 struct CursorOverallUsage: Decodable {
