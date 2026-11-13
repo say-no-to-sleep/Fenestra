@@ -187,30 +187,6 @@ final class HistoryStore {
     }
   }
 
-  func comparableWindows(
-    providerID: ProviderID,
-    poolID: String,
-    windowID: String,
-    before date: Date = .distantFuture
-  ) async -> [HistoricalUsageWindow] {
-    guard databaseAvailable, let regime = activeRegimes[providerID] else { return [] }
-    do {
-      return try await database.comparableWindows(
-        providerID: providerID,
-        seriesKey: HistoryDatabase.seriesKey(
-          providerID: providerID,
-          poolID: poolID,
-          windowID: windowID
-        ),
-        regimeID: regime.id,
-        before: date
-      )
-    } catch {
-      LocalLog.record("Comparable history query failed: \(error.localizedDescription)")
-      return []
-    }
-  }
-
   func startNewProfile(providerID: ProviderID, now: Date = Date()) async {
     guard databaseAvailable else { return }
     do {

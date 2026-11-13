@@ -46,7 +46,6 @@ final class FenestraStore {
   @ObservationIgnored private var claudeProjectsWatcher: ClaudeProjectsWatcher?
   @ObservationIgnored private var hasStarted = false
   @ObservationIgnored private var userSelectedProvider = false
-  @ObservationIgnored private var personalizedPredictions: [String: ExhaustionPrediction] = [:]
   @ObservationIgnored private var anomalyDetector = AnomalyDetector()
 
   func start() async {
@@ -138,7 +137,6 @@ final class FenestraStore {
         availability: .available
       )
       await history.append(snapshot)
-      await updatePersonalizedPredictions(snapshot: snapshot)
       let anomalies = anomalyDetector.evaluate(
         snapshot: snapshot,
         history: history.points,
@@ -161,8 +159,7 @@ final class FenestraStore {
       await notificationManager.evaluate(
         snapshot: snapshot,
         history: history,
-        settings: settings,
-        predictions: personalizedPredictions
+        settings: settings
       )
     } catch {
       let message =
@@ -259,62 +256,65 @@ final class FenestraStore {
     window: UsageWindowSnapshot,
     at date: Date
   ) -> PaceEvaluation? {
-    let recent = history.recentPoints(
-      providerID: providerID,
-      poolID: pool.id,
-      windowID: window.id,
-      now: date,
-      lookback: 2 * 60 * 60
-    )
-    guard let baseline = PaceCalculator.evaluate(window: window, at: date, recentHistory: recent)
-    else { return nil }
-    let prediction = personalizedPredictions[
-      predictionKey(providerID: providerID, poolID: pool.id, windowID: window.id)
-    ] ?? baseline.exhaustionPrediction
-    return PaceEvaluation(
-      idealRemaining: baseline.idealRemaining,
-      delta: baseline.delta,
-      exhaustionPrediction: prediction
-    )
+    PaceCalculator.evaluate(window: window, at: date)
   }
 
-  /// The selected provider's shortest window, preferring main Codex limits
-  /// over separate model quotas such as Spark.
-  var selectedMenuQuota: UrgentQuotaSummary? {
-    guard settings.isEnabled(selectedProvider),
-      let snapshot = states[selectedProvider]?.snapshot
-    else {
+  /// One headline quota for a provider. By default its shortest window, preferring main
+  /// Codex limits over separate model quotas such as Spark. With `limiting`, the main
+  /// window furthest over pace instead, falling back to the shortest when no pace is known.
+  func quotaSummary(for providerID: ProviderID, limiting: Bool = false) -> UrgentQuotaSummary? {
+    guard settings.isEnabled(providerID), let snapshot = states[providerID]?.snapshot else {
       return nil
     }
-    let candidates = snapshot.pools.flatMap { pool in pool.windows.map { (pool, $0) } }
+    let candidates = snapshot.pools.flatMap { pool in
+      pool.windows.map { window in
+        (pool: pool, window: window,
+         evaluation: paceEvaluation(providerID: providerID, pool: pool, window: window,
+                                    at: snapshot.freshness))
+      }
+    }
+    let tightest = limiting
+      ? candidates.filter { !$0.window.isSupplementary && $0.evaluation != nil }
+          .min { ($0.evaluation?.delta ?? 0) < ($1.evaluation?.delta ?? 0) }
+      : nil
     // min(by:) keeps the first of equal-ranked windows, preserving provider window order.
     guard
-      let (pool, window) = candidates.min(by: {
-        Self.menuWindowRank($0.1) < Self.menuWindowRank($1.1)
+      let choice = tightest ?? candidates.min(by: {
+        Self.menuWindowRank($0.window) < Self.menuWindowRank($1.window)
       })
     else {
       return nil
     }
-    let evaluation = paceEvaluation(
-      providerID: selectedProvider,
-      pool: pool,
-      window: window,
-      at: snapshot.freshness
-    )
     return UrgentQuotaSummary(
-      providerID: selectedProvider,
-      poolName: pool.name,
-      windowName: window.label,
-      remainingPercent: window.remainingPercent,
-      paceDelta: evaluation?.delta,
-      prediction: evaluation?.exhaustionPrediction,
-      reset: window.windowEnd,
-      windowKind: window.kind
+      providerID: providerID,
+      poolName: choice.pool.name,
+      windowName: choice.window.label,
+      remainingPercent: choice.window.remainingPercent,
+      paceDelta: choice.evaluation?.delta,
+      prediction: choice.evaluation?.exhaustionPrediction,
+      reset: choice.window.windowEnd,
+      windowKind: choice.window.kind
     )
   }
 
-  var selectedMenuUrgency: PaceUrgency {
-    Self.urgency(delta: selectedMenuQuota?.paceDelta)
+  /// What the menu bar shows: the selected provider, or (opt-in) the fresh provider
+  /// furthest over pace. Stale readings never drive the choice.
+  var menuQuota: UrgentQuotaSummary? {
+    let selected = quotaSummary(for: selectedProvider)
+    guard settings.menuBarFollowsMostUrgent else { return selected }
+    return Self.mostUrgent(
+      settings.enabledProviders.filter { !isStale($0) }
+        .compactMap { quotaSummary(for: $0, limiting: true) }
+    ) ?? selected
+  }
+
+  static func mostUrgent(_ summaries: [UrgentQuotaSummary]) -> UrgentQuotaSummary? {
+    summaries.filter { $0.paceDelta != nil }
+      .min { ($0.paceDelta ?? 0) < ($1.paceDelta ?? 0) }
+  }
+
+  var menuUrgency: PaceUrgency {
+    Self.urgency(delta: menuQuota?.paceDelta)
   }
 
   /// Main Codex limits precede extra model quotas. Within each group, measured
@@ -339,29 +339,6 @@ final class FenestraStore {
     if delta < -25 { return .critical }
     if delta < -10 { return .warning }
     return .good
-  }
-
-  var resetTimeline: [ResetTimelineItem] {
-    settings.enabledProviders.flatMap { providerID -> [ResetTimelineItem] in
-      guard let snapshot = states[providerID]?.snapshot else { return [] }
-      return snapshot.pools.flatMap { pool in
-        pool.windows.map {
-          ResetTimelineItem(
-            providerID: providerID,
-            poolName: pool.name,
-            windowName: $0.label,
-            reset: $0.windowEnd
-          )
-        }
-      }
-    }.sorted {
-      switch ($0.reset, $1.reset) {
-      case (.some(let lhs), .some(let rhs)): lhs < rhs
-      case (.some, .none): true
-      case (.none, .some): false
-      case (.none, .none): $0.providerID.displayName < $1.providerID.displayName
-      }
-    }
   }
 
   var urgency: PaceUrgency {
@@ -389,18 +366,35 @@ final class FenestraStore {
     return deltas.min()
   }
 
-  var smartSuggestion: String {
+  var smartSuggestion: (text: String, target: ProviderID?) {
     let now = Date()
-    let candidates = settings.enabledProviders.compactMap { provider -> (ProviderID, Double)? in
+    let candidates = settings.enabledProviders.compactMap {
+      provider -> (provider: ProviderID, delta: Double)? in
       guard !isStale(provider, at: now), let snapshot = states[provider]?.snapshot,
         let delta = Self.limitingPace(snapshot, at: now)
       else { return nil }
       return (provider, delta)
     }
-    guard candidates.count >= 2 else { return "Not enough fresh quotas to compare" }
-    guard let best = candidates.max(by: { $0.1 < $1.1 }) else { return "Pace unknown" }
-    if best.1 < -10 { return "Main quotas are running over pace" }
-    return "\(best.0.displayName) has the most main-quota headroom"
+    return Self.suggestion(candidates, selected: selectedProvider)
+  }
+
+  /// Names the provider with the most main-quota headroom and by how much. `target` is
+  /// set only when that is a different provider worth switching to.
+  static func suggestion(
+    _ candidates: [(provider: ProviderID, delta: Double)], selected: ProviderID
+  ) -> (text: String, target: ProviderID?) {
+    guard candidates.count >= 2, let best = candidates.max(by: { $0.delta < $1.delta }) else {
+      return ("Not enough fresh quotas to compare", nil)
+    }
+    let name = best.provider.displayName
+    let pace = PaceEvaluation(idealRemaining: 0, delta: best.delta, exhaustionPrediction: nil)
+      .label.lowercased()
+    let target = best.provider == selected ? nil : best.provider
+    if best.delta < -10 {
+      return ("Every quota is over pace · \(name) is least behind (\(pace))", target)
+    }
+    if target == nil { return ("\(name) has the most headroom (\(pace))", nil) }
+    return ("Switch to \(name) · most headroom (\(pace))", target)
   }
 
   func historyPoints(
@@ -421,14 +415,12 @@ final class FenestraStore {
     await history.startNewProfile(providerID: selectedProvider)
     if let snapshot = states[selectedProvider]?.snapshot {
       await history.append(snapshot)
-      await updatePersonalizedPredictions(snapshot: snapshot)
       await updateHealth(providerID: selectedProvider)
     }
   }
 
   func clearLearnedAndHistoryData() async {
     await history.clearAll()
-    personalizedPredictions = [:]
     healthSummaries = [:]
   }
 
@@ -449,16 +441,6 @@ final class FenestraStore {
         "staleDuration": health?.staleDuration ?? 0,
       ]
     }
-    let predictionEvidence: [[String: Any]] = personalizedPredictions.map { key, prediction in
-      [
-        "series": key,
-        "method": prediction.method.rawValue,
-        "confidence": prediction.confidence.rawValue,
-        "evidenceCount": prediction.evidenceCount,
-        "validationErrorSeconds": prediction.validationError ?? NSNull(),
-        "notificationEligible": prediction.notificationEligible,
-      ]
-    }
     let failures = payload?.refreshEvents.compactMap(\.failureCategory?.rawValue) ?? []
     let object: [String: Any] = [
       "generatedAt": ISO8601DateFormatter().string(from: Date()),
@@ -466,7 +448,6 @@ final class FenestraStore {
       "osVersion": ProcessInfo.processInfo.operatingSystemVersionString,
       "databaseAvailable": history.databaseAvailable,
       "providers": providers,
-      "predictionEvidence": predictionEvidence,
       "refreshFailureCategories": Dictionary(grouping: failures, by: { $0 }).mapValues(\.count),
       "activeAnomalies": history.activeAnomalies.map {
         ["provider": $0.providerID.rawValue, "kind": $0.kind.rawValue, "detail": $0.detail]
@@ -534,10 +515,20 @@ final class FenestraStore {
     for providerID in settings.enabledProviders {
       guard let interval = settings.cadence(for: providerID).duration else { continue }
       pollingTasks[providerID] = Task { [weak self] in
+        var failures = 0
         while !Task.isCancelled {
-          try? await Task.sleep(for: .seconds(interval))
-          guard !Task.isCancelled else { return }
-          await self?.refresh(providerID)
+          // ponytail: a source that keeps failing (e.g. Antigravity closed, which makes the
+          // core boot the `agy` backend every poll) backs off 2x per failure up to 16x, capped
+          // at 15 min. Wake, user refresh, and "Open Antigravity" still refresh immediately.
+          let delay = min(interval * Double(1 << min(failures, 4)), max(interval, 15 * 60))
+          try? await Task.sleep(for: .seconds(delay))
+          guard !Task.isCancelled, let self else { return }
+          await self.refresh(providerID)
+          if case .unavailable = self.states[providerID]?.availability {
+            failures += 1
+          } else {
+            failures = 0
+          }
         }
       }
     }
@@ -607,47 +598,6 @@ final class FenestraStore {
     }
   }
 
-  private func updatePersonalizedPredictions(snapshot: UsageSnapshot) async {
-    for pool in snapshot.pools {
-      for window in pool.windows {
-        let recent = history.recentPoints(
-          providerID: snapshot.providerID,
-          poolID: pool.id,
-          windowID: window.id,
-          now: snapshot.freshness,
-          lookback: 2 * 60 * 60
-        )
-        let baseline = PaceCalculator.exhaustionPrediction(
-          remainingPercent: window.remainingPercent,
-          now: snapshot.freshness,
-          recentHistory: recent
-        )
-        let key = predictionKey(
-          providerID: snapshot.providerID,
-          poolID: pool.id,
-          windowID: window.id
-        )
-        guard settings.personalizedForecastingEnabled else {
-          personalizedPredictions[key] = baseline
-          continue
-        }
-        let comparable = await history.comparableWindows(
-          providerID: snapshot.providerID,
-          poolID: pool.id,
-          windowID: window.id
-        )
-        personalizedPredictions[key] = PersonalizedForecaster.forecast(
-          baseline: baseline,
-          window: window,
-          now: snapshot.freshness,
-          histories: comparable,
-          returningPlanNeedsValidation:
-            history.activeRegimes[snapshot.providerID]?.returningPlanNeedsValidation ?? false
-        )
-      }
-    }
-  }
-
   private func updateHealth(providerID: ProviderID) async {
     let snapshot = states[providerID]?.snapshot
     healthSummaries[providerID] = await history.healthSummary(
@@ -655,10 +605,6 @@ final class FenestraStore {
       source: snapshot?.sourceDescription,
       staleDuration: snapshot.map { max(0, Date().timeIntervalSince($0.freshness)) } ?? 0
     )
-  }
-
-  private func predictionKey(providerID: ProviderID, poolID: String, windowID: String) -> String {
-    "\(providerID.rawValue)|\(poolID)|\(windowID)"
   }
 
   private static func failureCategory(_ error: Error) -> RefreshFailureCategory {

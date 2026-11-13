@@ -82,8 +82,13 @@ struct ReviewImprovementsTests {
   @Test func rendersDashboardStates() async throws {
     let usage = snapshot([window("codex-secondary", remaining: 77), window("codex-extra-spark", remaining: 100)])
     let store = FenestraStore.preview(state: ProviderDisplayState(snapshot: usage, availability: .available))
-    try await render(ProviderHistoryView(store: store, onContentHeightChange: { _ in })
-      .frame(width: 580, height: 600), name: "history-picker")
+    let emptyWindow = HistoricalUsageWindow(
+      id: UUID(), providerID: .codex, seriesKey: "test", poolID: "default",
+      windowID: "codex-primary", kind: .fiveHour,
+      start: now.addingTimeInterval(-5 * 3600), end: now, quotaTotal: 100,
+      regimeID: nil, planName: "plus", observationCoverage: 0, samples: [])
+    try await render(HistoricalWindowEmptyView(label: "Session", window: emptyWindow)
+      .frame(width: 550), name: "history-no-samples")
     let main = usage.pools[0].windows[0]
     try await render(WindowPanel(providerID: .codex, pool: usage.pools[0], window: main,
       freshness: now, history: [], evaluation: PaceEvaluation(idealRemaining: 85, delta: -8,
@@ -96,7 +101,11 @@ struct ReviewImprovementsTests {
     try await render(DashboardView(store: store), name: "compact")
     let stale = FenestraStore.preview(state: ProviderDisplayState(snapshot: usage, availability: .unavailable("Offline · showing saved usage")))
     try await render(DashboardView(store: stale), name: "stale")
-    try await render(ActivityHistoryView(activity: [], pace: []).frame(width: 580, height: 580), name: "history-empty")
+    try await render(GeneralSettingsTab(store: store).frame(width: 600), name: "settings-general")
+    try await render(ProvidersSettingsTab(store: store, search: .constant(""), configure: { _ in })
+      .frame(width: 600), name: "settings-providers")
+    try await render(SettingsView(store: store), name: "settings-window")
+    try await render(AlertsSettingsTab(settings: store.settings).frame(width: 600), name: "settings-alerts")
   }
 
   private func render<V: View>(_ content: V, name: String) async throws {

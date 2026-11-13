@@ -11,8 +11,10 @@ struct FenestraApp: App {
       DashboardView(store: store)
         .environment(\.paceTheme, store.settings.paceTheme)
     } label: {
-      MenuBarGlyph(urgency: store.selectedMenuUrgency, quota: store.selectedMenuQuota,
-                   isStale: store.isStale(store.selectedProvider, at: menuNow))
+      MenuBarGlyph(urgency: store.menuUrgency, quota: store.menuQuota,
+                   isStale: store.isStale(store.menuQuota?.providerID ?? store.selectedProvider,
+                                          at: menuNow),
+                   showsProviderName: store.settings.menuBarShowsProviderName)
         .environment(\.paceTheme, store.settings.paceTheme)
         .task {
           await store.start()
@@ -49,6 +51,7 @@ private struct MenuBarGlyph: View {
   let urgency: PaceUrgency
   let quota: UrgentQuotaSummary?
   let isStale: Bool
+  let showsProviderName: Bool
   @Environment(\.paceTheme) private var paceTheme
 
   var body: some View {
@@ -57,7 +60,7 @@ private struct MenuBarGlyph: View {
         .symbolRenderingMode(.monochrome)
         .foregroundStyle(isStale ? .orange : paceTheme.urgencyColor(urgency))
       if let quota {
-        Text("\(quota.providerID.displayName) \(quota.remainingPercent.formatted(.number.precision(.fractionLength(0))))% · \(quota.windowKind.shortLabel)")
+        Text("\(showsProviderName ? quota.providerID.displayName + " " : "")\(quota.remainingPercent.formatted(.number.precision(.fractionLength(0))))% · \(quota.windowKind.shortLabel)")
           .monospacedDigit()
       }
     }
@@ -78,7 +81,7 @@ private struct MenuBarGlyph: View {
 
   private var accessibilityText: String {
     if let quota {
-      var value = "Fenestra. Selected quota: \(quota.providerID.displayName) \(quota.windowName), \(quota.remainingPercent.formatted(.number.precision(.fractionLength(0)))) percent remaining"
+      var value = "Fenestra. \(quota.providerID.displayName) \(quota.windowName), \(quota.remainingPercent.formatted(.number.precision(.fractionLength(0)))) percent remaining"
       if let delta = quota.paceDelta {
         value += delta < 0 ? ", \(abs(delta).rounded().formatted()) percentage points over pace" : ", on pace"
       }

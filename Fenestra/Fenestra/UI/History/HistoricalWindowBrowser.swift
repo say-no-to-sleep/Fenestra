@@ -42,28 +42,32 @@ struct HistoricalWindowBrowser: View {
       .controlSize(.mini)
 
       if let selected {
-        WindowPanel(
-          providerID: providerID,
-          pool: pool,
-          window: selectedSnapshot(selected),
-          freshness: selected.samples.last?.timestamp ?? selected.end,
-          history: selected.samples,
-          evaluation: nil,
-          embedded: true
-        )
-        HistoricalWindowStats(window: selected)
-        Toggle("Compare with Current", isOn: $compareWithCurrent)
-          .toggleStyle(.switch)
-          .controlSize(.mini)
-          .frame(maxWidth: .infinity, alignment: .trailing)
-        if compareWithCurrent {
-          NormalizedComparisonChart(
-            current: currentHistory,
-            currentStart: window.windowStart,
-            currentEnd: window.windowEnd,
-            selected: selected
+        if let latest = selected.samples.last {
+          WindowPanel(
+            providerID: providerID,
+            pool: pool,
+            window: selectedSnapshot(selected, remainingPercent: latest.remainingPercent),
+            freshness: latest.timestamp,
+            history: selected.samples,
+            evaluation: nil,
+            embedded: true
           )
-          .frame(height: 150)
+          HistoricalWindowStats(window: selected)
+          Toggle("Compare with Current", isOn: $compareWithCurrent)
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+          if compareWithCurrent {
+            NormalizedComparisonChart(
+              current: currentHistory,
+              currentStart: window.windowStart,
+              currentEnd: window.windowEnd,
+              selected: selected
+            )
+            .frame(height: 150)
+          }
+        } else {
+          HistoricalWindowEmptyView(label: window.label, window: selected)
         }
       } else {
         WindowPanel(
@@ -101,7 +105,7 @@ struct HistoricalWindowBrowser: View {
     historyStore.activeRegimes[providerID]?.id.uuidString ?? "none"
   }
 
-  private func selectedSnapshot(_ historical: HistoricalUsageWindow) -> UsageWindowSnapshot {
+  private func selectedSnapshot(_ historical: HistoricalUsageWindow, remainingPercent: Double) -> UsageWindowSnapshot {
     UsageWindowSnapshot(
       id: historical.windowID,
       kind: historical.kind,
@@ -110,10 +114,34 @@ struct HistoricalWindowBrowser: View {
       windowEnd: historical.end,
       quotaTotal: historical.quotaTotal,
       used: historical.totalPercentUsed,
-      remainingPercent: historical.samples.last?.remainingPercent ?? 100,
+      remainingPercent: remainingPercent,
       resetSource: "History",
       breakdown: []
     )
+  }
+}
+
+struct HistoricalWindowEmptyView: View {
+  let label: String
+  let window: HistoricalUsageWindow
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text(label)
+        .font(.headline)
+      ContentUnavailableView(
+        "No recorded usage data",
+        systemImage: "chart.xyaxis.line",
+        description: Text("No usage samples are available for this window.")
+      )
+      .frame(maxWidth: .infinity, minHeight: 177)
+      Text("\(window.start.formatted(date: .abbreviated, time: .shortened)) – \(window.end.formatted(date: .abbreviated, time: .shortened))")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      LabeledContent("Plan", value: window.planName ?? "Unidentified")
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+    }
   }
 }
 

@@ -64,6 +64,82 @@ struct HistoryStoreTests {
     #expect(store.points(providerID: .claudeCode, poolID: "default", windowID: "five-hour").isEmpty)
   }
 
+  @Test(arguments: [false, true])
+  func historicalNavigationGroupsDriftingResetsAndKeepsAdjacentSessions(includeOtherRegimes: Bool) async throws {
+    let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let database = HistoryDatabase(databaseURL: directory.appending(path: "history.sqlite"))
+    let base = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 3 * 24 * 3600)
+    let duration: TimeInterval = 5 * 3600
+    var regimeID: UUID?
+    // Reproduce the existing database: each poll has its own slightly shifted window.
+    for offset in [0.0, 120, 240, duration + 300] {
+      let date = base.addingTimeInterval(offset)
+      regimeID = try await database.record(snapshot: snapshot(at: date, remaining: 90), points: []).regime.id
+    }
+    let windows = try await database.historicalWindows(
+      providerID: .claudeCode, seriesKey: HistoryDatabase.seriesKey(
+        providerID: .claudeCode, poolID: "default", windowID: "five-hour"),
+      regimeID: regimeID, includeOtherRegimes: includeOtherRegimes, limit: 2)
+    #expect(windows.count == 2)
+    // Keep the latest provider-supplied pair, rather than a fabricated union timeline.
+    #expect(windows.last?.start == base.addingTimeInterval(180))
+    #expect(windows.last?.end == base.addingTimeInterval(duration + 240))
+    #expect(windows.first?.end == base.addingTimeInterval(2 * duration + 300))
+  }
+
+  @Test
+  func driftingReportsOfActiveSessionAreNotOfferedAsCompleted() async throws {
+    let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let database = HistoryDatabase(databaseURL: directory.appending(path: "history.sqlite"))
+    let now = Date()
+    for offset in [-120.0, 120] {
+      let date = now.addingTimeInterval(-5 * 3600 + offset)
+      _ = try await database.record(snapshot: snapshot(at: date, remaining: 90), points: [])
+    }
+    let windows = try await database.historicalWindows(
+      providerID: .claudeCode, seriesKey: HistoryDatabase.seriesKey(
+        providerID: .claudeCode, poolID: "default", windowID: "five-hour"),
+      regimeID: nil, includeOtherRegimes: true, limit: 50)
+    #expect(windows.isEmpty)
+  }
+
+  /// Regression: previous sessions vanished from history when a new report overlapped them.
+  @Test
+  func keepsBackToBackAndEarlyResetSessionsButCollapsesIdlePlaceholders() async throws {
+    let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let database = HistoryDatabase(databaseURL: directory.appending(path: "history.sqlite"))
+    let base = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) - 4 * 24 * 3600)
+    let duration: TimeInterval = 5 * 3600
+    // `snapshot(at:)` reports a window starting 60s before the poll.
+    let a = base
+    let b = a.addingTimeInterval(duration + 59)  // starts 1s before A's reported end (Claude jitter)
+    let c = b.addingTimeInterval(3600)  // Codex-style early reset while B is still open
+    let idle1 = c.addingTimeInterval(duration + 3600)  // sliding windows while unused
+    let idle2 = idle1.addingTimeInterval(1200)
+    let e = idle2.addingTimeInterval(1200)
+    var regimeID: UUID?
+    for (date, remaining) in [(a, 50.0), (b, 50), (c, 50), (idle1, 100), (idle2, 100), (e, 50)] {
+      let points = remaining < 100
+        ? [HistoryPoint(
+            providerID: .claudeCode, poolID: "default", windowID: "five-hour",
+            timestamp: date, remainingPercent: remaining, paceDelta: nil)]
+        : []
+      regimeID = try await database.record(
+        snapshot: snapshot(at: date, remaining: remaining), points: points
+      ).regime.id
+    }
+    let windows = try await database.historicalWindows(
+      providerID: .claudeCode, seriesKey: HistoryDatabase.seriesKey(
+        providerID: .claudeCode, poolID: "default", windowID: "five-hour"),
+      regimeID: regimeID, includeOtherRegimes: false, limit: 50)
+    #expect(windows.map(\.start) == [e, c, b, a].map { $0.addingTimeInterval(-60) })
+    // B's chart stops at C's reset instead of absorbing C's samples.
+    #expect(windows[2].samples.map(\.timestamp) == [b])
+  }
+
   private func snapshot(at date: Date, remaining: Double) -> UsageSnapshot {
     UsageSnapshot(
       providerID: .claudeCode,

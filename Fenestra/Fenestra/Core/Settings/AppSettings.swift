@@ -64,7 +64,8 @@ final class AppSettings {
   var launchAtLogin = false { didSet { changed() } }
   var paceThemeStyle: PaceThemeStyle = .classic { didSet { changed() } }
   var expandedPopover = true { didSet { changed() } }
-  var personalizedForecastingEnabled = true { didSet { changed() } }
+  var menuBarFollowsMostUrgent = false { didSet { changed() } }
+  var menuBarShowsProviderName = true { didSet { changed() } }
 
   var lastSelectedProvider: ProviderID = .claudeCode {
     didSet {
@@ -157,8 +158,9 @@ final class AppSettings {
       paceThemeStyle = style
     }
     expandedPopover = defaults.object(forKey: Keys.expandedPopover) as? Bool ?? true
-    personalizedForecastingEnabled =
-      defaults.object(forKey: Keys.personalizedForecastingEnabled) as? Bool ?? true
+    menuBarFollowsMostUrgent = defaults.bool(forKey: Keys.menuBarFollowsMostUrgent)
+    menuBarShowsProviderName =
+      defaults.object(forKey: Keys.menuBarShowsProviderName) as? Bool ?? true
     if let raw = defaults.string(forKey: Keys.lastSelectedProvider),
       let providerID = ProviderID(rawValue: raw)
     {
@@ -308,7 +310,8 @@ final class AppSettings {
     defaults.set(launchAtLogin, forKey: Keys.launchAtLogin)
     defaults.set(paceThemeStyle.rawValue, forKey: Keys.paceThemeStyle)
     defaults.set(expandedPopover, forKey: Keys.expandedPopover)
-    defaults.set(personalizedForecastingEnabled, forKey: Keys.personalizedForecastingEnabled)
+    defaults.set(menuBarFollowsMostUrgent, forKey: Keys.menuBarFollowsMostUrgent)
+    defaults.set(menuBarShowsProviderName, forKey: Keys.menuBarShowsProviderName)
   }
 
   private func providerKey(_ providerID: ProviderID, suffix: String) -> String {
@@ -387,7 +390,8 @@ final class AppSettings {
     static let launchAtLogin = "general.launchAtLogin"
     static let paceThemeStyle = "general.paceThemeStyle"
     static let expandedPopover = "general.expandedPopover"
-    static let personalizedForecastingEnabled = "forecast.personalizedEnabled"
+    static let menuBarFollowsMostUrgent = "general.menuBarFollowsMostUrgent"
+    static let menuBarShowsProviderName = "general.menuBarShowsProviderName"
     static let lastSelectedProvider = "general.lastSelectedProvider"
   }
 }

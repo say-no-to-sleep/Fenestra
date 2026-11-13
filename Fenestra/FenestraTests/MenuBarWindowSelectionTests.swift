@@ -144,3 +144,55 @@ struct LastSelectedProviderTests {
     #expect(reloaded.lastSelectedProvider == .cursor)
   }
 }
+
+@Suite("Overview suggestion and menu bar follow")
+@MainActor
+struct OverviewSuggestionTests {
+  private func summary(_ provider: ProviderID, delta: Double?) -> UrgentQuotaSummary {
+    UrgentQuotaSummary(providerID: provider, poolName: "Default", windowName: "Weekly",
+                       remainingPercent: 50, paceDelta: delta, prediction: nil, reset: nil,
+                       windowKind: .weekly)
+  }
+
+  @Test func suggestionNamesTheProviderAndItsHeadroom() {
+    let switchTo = FenestraStore.suggestion(
+      [(.claudeCode, -20), (.codex, 12)], selected: .claudeCode)
+    #expect(switchTo.text == "Switch to \(ProviderID.codex.displayName) · most headroom (12 pp under pace)")
+    #expect(switchTo.target == .codex)
+
+    let stay = FenestraStore.suggestion([(.claudeCode, -20), (.codex, 12)], selected: .codex)
+    #expect(stay.target == nil)
+    #expect(stay.text.contains("has the most headroom"))
+
+    let allOver = FenestraStore.suggestion([(.claudeCode, -30), (.codex, -15)], selected: .claudeCode)
+    #expect(allOver.text.hasPrefix("Every quota is over pace"))
+    #expect(allOver.target == .codex)
+
+    #expect(FenestraStore.suggestion([(.codex, 12)], selected: .codex).target == nil)
+  }
+
+  @Test func mostUrgentIgnoresProvidersWithoutAPace() {
+    let picked = FenestraStore.mostUrgent([
+      summary(.cursor, delta: nil), summary(.codex, delta: -5), summary(.claudeCode, delta: -30),
+    ])
+    #expect(picked?.providerID == .claudeCode)
+    #expect(FenestraStore.mostUrgent([summary(.cursor, delta: nil)]) == nil)
+  }
+
+  @Test func menuBarSettingsPersist() throws {
+    let suiteName = "FenestraTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let settings = AppSettings(defaults: defaults)
+    settings.load()
+    #expect(!settings.menuBarFollowsMostUrgent)
+    #expect(settings.menuBarShowsProviderName)
+    settings.menuBarFollowsMostUrgent = true
+    settings.menuBarShowsProviderName = false
+
+    let reloaded = AppSettings(defaults: defaults)
+    reloaded.load()
+    #expect(reloaded.menuBarFollowsMostUrgent)
+    #expect(!reloaded.menuBarShowsProviderName)
+  }
+}

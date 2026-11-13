@@ -55,8 +55,7 @@ final class NotificationManager {
   func evaluate(
     snapshot: UsageSnapshot,
     history: HistoryStore,
-    settings: AppSettings,
-    predictions: [String: ExhaustionPrediction] = [:]
+    settings: AppSettings
   ) async {
     guard settings.notificationsEnabled else { return }
     let center = UNUserNotificationCenter.current()
@@ -71,26 +70,7 @@ final class NotificationManager {
     for pool in snapshot.pools {
       for window in pool.windows {
         let key = "\(snapshot.providerID.rawValue).\(pool.id).\(window.id)"
-        let recent = history.recentPoints(
-          providerID: snapshot.providerID,
-          poolID: pool.id,
-          windowID: window.id,
-          now: snapshot.freshness,
-          lookback: 2 * 60 * 60
-        )
-        var evaluation = PaceCalculator.evaluate(
-          window: window,
-          at: snapshot.freshness,
-          recentHistory: recent
-        )
-        let predictionKey = "\(snapshot.providerID.rawValue)|\(pool.id)|\(window.id)"
-        if let prediction = predictions[predictionKey], let base = evaluation {
-          evaluation = PaceEvaluation(
-            idealRemaining: base.idealRemaining,
-            delta: base.delta,
-            exhaustionPrediction: prediction
-          )
-        }
+        let evaluation = PaceCalculator.evaluate(window: window, at: snapshot.freshness)
         if let evaluation {
           await evaluateBadPace(
             key: key,

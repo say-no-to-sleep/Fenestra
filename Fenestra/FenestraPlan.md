@@ -199,3 +199,9 @@ Review the codebase and identify:
 - anything that works now but will be painful to maintain later
 
 Then Fix your implementation if anything surfaces.
+
+### Historical window identity
+
+Previous-window navigation groups overlapping reports within the same quota series, plan regime, window kind, and quota total. Each entry retains the latest reported start/reset pair; raw records remain intact. Non-overlapping windows remain separate. Grouping happens before filtering completed windows so an earlier reset revision of an active window is not offered as a previous session.
+
+Historical windows without matching usage samples show an explicit no-data state with their reported dates and plan. They must not substitute 100% remaining or display zero usage/burn statistics or comparison controls.

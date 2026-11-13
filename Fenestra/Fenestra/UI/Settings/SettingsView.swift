@@ -8,23 +8,30 @@ struct SettingsView: View {
   @State private var providerSearch = ""
 
   var body: some View {
-    TabView(selection: $selectedTab) {
-      Tab("General", systemImage: "gear", value: "general") {
-        GeneralSettingsTab(store: store)
+    // Sidebar layout, like System Settings: fixed window, each pane scrolls on its own.
+    NavigationSplitView {
+      List(selection: $selectedTab) {
+        Label("General", systemImage: "gear").tag("general")
+        Label("Providers", systemImage: "square.grid.2x2").tag("providers")
+        Label("Alerts", systemImage: "bell").tag("alerts")
       }
-      Tab("Providers", systemImage: "square.grid.2x2", value: "providers") {
+      .navigationSplitViewColumnWidth(170)
+      .toolbar(removing: .sidebarToggle)
+    } detail: {
+      switch selectedTab {
+      case "providers":
         ProvidersSettingsTab(
           store: store,
           search: $providerSearch,
           configure: { store.providerToConfigure = $0 }
         )
-      }
-      Tab("Alerts", systemImage: "bell", value: "alerts") {
+      case "alerts":
         AlertsSettingsTab(settings: store.settings)
+      default:
+        GeneralSettingsTab(store: store)
       }
     }
-    .scenePadding()
-    .frame(width: 640, height: 680)
+    .frame(width: 760, height: 540)
     .background(SettingsWindowLifecycle())
     .onChange(of: store.providerToConfigure, initial: true) {
       if store.providerToConfigure != nil { selectedTab = "providers" }
@@ -38,7 +45,7 @@ struct SettingsView: View {
   }
 }
 
-private struct GeneralSettingsTab: View {
+struct GeneralSettingsTab: View {
   let store: FenestraStore
   @State private var exportDocument: UsageExportDocument?
   @State private var exportName = "Fenestra Usage"
@@ -62,22 +69,35 @@ private struct GeneralSettingsTab: View {
             Text(style.label).tag(style)
           }
         }
-        Toggle("Personalized forecasting", isOn: $settings.personalizedForecastingEnabled)
       }
-      Section("Privacy") {
-        Text("Provider endpoints only · No analytics · Local history")
-          .foregroundStyle(.secondary)
-        Button("Show debug log") {
-          NSWorkspace.shared.activateFileViewerSelecting([LocalLog.fileURL])
+      Section("Menu bar") {
+        Picker("Show", selection: $settings.menuBarFollowsMostUrgent) {
+          Text("Selected provider").tag(false)
+          Text("Provider furthest over pace").tag(true)
         }
+        Toggle("Show provider name", isOn: $settings.menuBarShowsProviderName)
       }
-      Section("Export and diagnostics") {
-        Button("Export Usage CSV…") { prepareExport(.csv) }
-        Button("Export Full Usage JSON…") { prepareExport(.fullJSON) }
-        Button("Export Privacy-Safe Diagnostics…") { prepareExport(.diagnostics) }
-        Button("Clear Learned and History Data…", role: .destructive) {
-          confirmingClear = true
+      Section {
+        LabeledContent("Usage history") {
+          Button("Export CSV…") { prepareExport(.csv) }
+          Button("Export JSON…") { prepareExport(.fullJSON) }
         }
+        LabeledContent("Diagnostics") {
+          Button("Export…") { prepareExport(.diagnostics) }
+            .help("Privacy-safe diagnostics: no credentials or account details")
+          Button("Show Log") {
+            NSWorkspace.shared.activateFileViewerSelecting([LocalLog.fileURL])
+          }
+        }
+        LabeledContent("Learned and history data") {
+          Button("Clear…", role: .destructive) {
+            confirmingClear = true
+          }
+        }
+      } header: {
+        Text("Data")
+      } footer: {
+        Text("Provider endpoints only · No analytics · History stays on this Mac")
       }
     }
     .formStyle(.grouped)
@@ -138,7 +158,7 @@ private struct UsageExportDocument: FileDocument {
   }
 }
 
-private struct ProvidersSettingsTab: View {
+struct ProvidersSettingsTab: View {
   let store: FenestraStore
   @Binding var search: String
   let configure: (ProviderID) -> Void
@@ -150,11 +170,17 @@ private struct ProvidersSettingsTab: View {
   var body: some View {
     @Bindable var settings = store.settings
     Form {
+      // ponytail: inline field, not .searchable — in a Settings window that lands in the
+      // tab toolbar with a stray "Search" caption and grabs focus on open.
+      Section {
+        TextField("Search providers", text: $search, prompt: Text("Search providers"))
+          .labelsHidden()
+          .textFieldStyle(.roundedBorder)
+      }
       providerSection("Enabled", providers: matches.filter(settings.isEnabled))
-      providerSection("Available", providers: matches.filter { !settings.isEnabled($0) })
 
-      if search.isEmpty {
-        Section("Claude") {
+      if search.isEmpty, settings.isEnabled(.claudeCode) {
+        Section {
           Toggle("Manual weekly reset", isOn: $settings.useClaudeWeeklyResetOverride)
           if settings.useClaudeWeeklyResetOverride {
             DatePicker(
@@ -164,16 +190,25 @@ private struct ProvidersSettingsTab: View {
               displayedComponents: [.date, .hourAndMinute]
             )
           }
-          Picker("Cache poll", selection: $settings.claudeCachePollCadence) {
+          Picker("Cache-hit poll", selection: $settings.claudeCachePollCadence) {
             ForEach(RefreshCadence.allCases) { cadence in
               Text(cadence.label).tag(cadence)
             }
           }
+        } header: {
+          Text("\(ProviderID.claudeCode.displayName) options")
+        } footer: {
+          Text("The manual reset is used only when Claude does not report its weekly reset time.")
         }
+      }
+
+      providerSection("Available", providers: matches.filter { !settings.isEnabled($0) })
+
+      if matches.isEmpty {
+        ContentUnavailableView.search(text: search)
       }
     }
     .formStyle(.grouped)
-    .searchable(text: $search, prompt: "Search providers")
   }
 
   @ViewBuilder
@@ -203,27 +238,35 @@ private struct ProvidersSettingsTab: View {
   }
 }
 
-private struct AlertsSettingsTab: View {
+struct AlertsSettingsTab: View {
   @Bindable var settings: AppSettings
 
   var body: some View {
     Form {
-      Section("Alerts") {
+      Section {
         Toggle("Notifications", isOn: $settings.notificationsEnabled)
-        Toggle("Anomaly notifications", isOn: $settings.anomalyNotificationsEnabled)
-        HStack {
-          Text("Notify at")
-          Slider(value: $settings.badPaceThresholdMagnitude, in: 5...75, step: 5)
-            .help("Percentage points below the even-spend target at which to notify you.")
-          Text("\(settings.badPaceThresholdMagnitude.formatted(.number.precision(.fractionLength(0)))) pp over pace")
-            .monospacedDigit()
-            .frame(width: 130, alignment: .trailing)
-        }
       }
+      Section {
+        LabeledContent("Notify when") {
+          HStack {
+            Slider(value: $settings.badPaceThresholdMagnitude, in: 5...75, step: 5)
+              .accessibilityLabel("Over-pace threshold")
+            Text("\(settings.badPaceThresholdMagnitude.formatted(.number.precision(.fractionLength(0)))) pp over pace")
+              .monospacedDigit()
+              .frame(width: 120, alignment: .trailing)
+          }
+        }
+        Toggle("Anomaly notifications", isOn: $settings.anomalyNotificationsEnabled)
+      } footer: {
+        Text(
+          "Pace alerts fire when a quota falls this many percentage points behind an even "
+            + "spend toward its reset. Anomaly alerts flag unusual provider readings."
+        )
+      }
+      .disabled(!settings.notificationsEnabled)
     }
     .formStyle(.grouped)
   }
-
 }
 
 enum ProviderCatalogFilter {
@@ -243,8 +286,11 @@ struct ProviderHealth: Equatable {
   let label: String
   let systemImage: String
   let color: Color
+  /// The provider's own failure message, when it has one.
+  var detail: String?
 
   init(enabled: Bool, state: ProviderDisplayState) {
+    if enabled, case .unavailable(let message) = state.availability { detail = message }
     guard enabled else {
       (label, systemImage, color) = ("Disabled", "minus.circle", .secondary)
       return
@@ -273,33 +319,44 @@ private struct ProviderSettingRow: View {
 
   var body: some View {
     HStack(spacing: 10) {
-      Toggle(isOn: $isEnabled) {
-        VStack(alignment: .leading, spacing: 2) {
-          Label(providerID.displayName, systemImage: providerID.systemImage)
-          Label(health.label, systemImage: health.systemImage)
+      Image(systemName: providerID.systemImage)
+        .foregroundStyle(.secondary)
+        .frame(width: 20)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(providerID.displayName)
+        if isEnabled {
+          Label(health.detail ?? health.label, systemImage: health.systemImage)
             .font(.caption)
             .foregroundStyle(health.color)
+            .lineLimit(1)
+            .help(health.detail ?? health.label)
         }
       }
-      .accessibilityLabel("\(providerID.displayName) enabled")
       Spacer()
-      Picker("Refresh", selection: $cadence) {
-        ForEach(RefreshCadence.allCases) { item in
-          Text(item.label).tag(item)
+      // Refresh and connection controls only mean something once a provider is on.
+      if isEnabled {
+        Picker("Refresh", selection: $cadence) {
+          ForEach(RefreshCadence.allCases) { item in
+            Text(item == .manual ? item.label : "Every \(item.label)").tag(item)
+          }
         }
-      }
-      .labelsHidden()
-      .frame(width: 110)
-      .disabled(!isEnabled)
-      .accessibilityLabel("\(providerID.displayName) refresh interval")
-      if providerID.hasConnectionConfiguration {
+        .labelsHidden()
+        .frame(width: 125)
+        .help("How often \(providerID.displayName) is refreshed")
+        .accessibilityLabel("\(providerID.displayName) refresh interval")
+        // Hidden (not removed) when unconfigurable so every row's controls stay in columns.
         Button("Configure \(providerID.displayName)", systemImage: "slider.horizontal.3") {
           configure()
         }
         .labelStyle(.iconOnly)
-        .help("Configure \(providerID.displayName)")
-        .disabled(!isEnabled)
+        .help("Connection settings for \(providerID.displayName)")
+        .disabled(!providerID.hasConnectionConfiguration)
+        .opacity(providerID.hasConnectionConfiguration ? 1 : 0)
+        .accessibilityHidden(!providerID.hasConnectionConfiguration)
       }
+      Toggle("\(providerID.displayName) enabled", isOn: $isEnabled)
+        .labelsHidden()
+        .toggleStyle(.switch)
     }
   }
 }
@@ -473,7 +530,7 @@ private struct ProviderConnectionEditor: View {
 #if DEBUG
   #Preview("Settings General") {
     GeneralSettingsTab(store: FenestraStore.preview())
-      .frame(width: 620, height: 620)
+      .frame(width: 600)
   }
 
   #Preview("Settings Providers") {
@@ -483,11 +540,11 @@ private struct ProviderConnectionEditor: View {
       search: $search,
       configure: { _ in }
     )
-    .frame(width: 620, height: 620)
+    .frame(width: 600)
   }
 
   #Preview("Settings Alerts") {
     AlertsSettingsTab(settings: AppSettings())
-      .frame(width: 620, height: 620)
+      .frame(width: 600)
   }
 #endif

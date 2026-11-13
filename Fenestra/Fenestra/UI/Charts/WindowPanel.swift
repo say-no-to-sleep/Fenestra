@@ -61,9 +61,6 @@ struct WindowPanel: View {
       } else if let status = predictionStatus {
         PredictionBanner(status: status)
       }
-      if let prediction = evaluation?.exhaustionPrediction, prediction.method != .recent {
-        ForecastEvidenceView(prediction: prediction, reset: window.windowEnd, showsStatus: false)
-      }
       if !window.breakdown.isEmpty {
         UsageBreakdown(items: window.breakdown)
       }

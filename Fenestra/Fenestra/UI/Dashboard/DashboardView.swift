@@ -3,22 +3,23 @@ import SwiftUI
 
 struct DashboardView: View {
   @Bindable var store: FenestraStore
+  @Environment(\.openSettings) private var openSettings
   @State private var contentHeight: CGFloat = 220
+  @State private var isRefreshingAll = false
 
   var body: some View {
     TimelineView(.periodic(from: .now, by: 60)) { _ in
       if store.settings.expandedPopover {
         expandedDashboard
       } else {
-        CompactDashboardView(store: store)
+        OverviewView(store: store, isRefreshing: isRefreshingAll, refreshAll: refreshAll)
       }
     }
     .containerBackground(.ultraThinMaterial, for: .window)
-    .background(providerShortcuts)
+    .background(shortcuts)
     .task {
       await store.start()
     }
-    .onChange(of: store.selectedProvider) { contentHeight = 220 }
   }
 
   private var expandedDashboard: some View {
@@ -28,7 +29,7 @@ struct DashboardView: View {
       dashboardContent
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       Divider()
-      DashboardFooter(suggestion: store.smartSuggestion)
+      DashboardFooter(store: store)
     }
     .frame(
       width: store.selectedProvider == .antigravity ? 820 : 580,
@@ -36,8 +37,9 @@ struct DashboardView: View {
     )
   }
 
-  // Invisible buttons so ⌘[ / ⌘] cycle providers and ⌘1…⌘9 jump directly.
-  private var providerShortcuts: some View {
+  // Invisible buttons: ⌘[ / ⌘] cycle providers, ⌘1…⌘9 jump directly, ⌘R refreshes,
+  // ⌘, opens Settings and ⌘Q quits (a menu-bar-only app has no main menu to carry them).
+  private var shortcuts: some View {
     let providers = store.settings.enabledProviders
     return Group {
       Button("Next provider") { cycleProvider(by: 1) }
@@ -45,13 +47,30 @@ struct DashboardView: View {
       Button("Previous provider") { cycleProvider(by: -1) }
         .keyboardShortcut("[")
       ForEach(Array(providers.prefix(9).enumerated()), id: \.element) { index, provider in
-        Button(provider.displayName) { store.select(provider) }
+        Button(provider.displayName) { show(provider) }
           .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")))
       }
+      Button("Refresh") {
+        if store.settings.expandedPopover {
+          Task { await store.refresh(store.selectedProvider, force: true) }
+        } else {
+          refreshAll()
+        }
+      }
+      .keyboardShortcut("r")
+      Button("Settings") { SettingsPresentation.open(using: openSettings) }
+        .keyboardShortcut(",")
+      Button("Quit") { NSApplication.shared.terminate(nil) }
+        .keyboardShortcut("q")
     }
     .opacity(0)
     .frame(width: 0, height: 0)
     .accessibilityHidden(true)
+  }
+
+  private func show(_ provider: ProviderID) {
+    store.select(provider)
+    store.settings.expandedPopover = true
   }
 
   private func cycleProvider(by delta: Int) {
@@ -59,7 +78,18 @@ struct DashboardView: View {
     guard !providers.isEmpty,
       let i = providers.firstIndex(of: store.selectedProvider)
     else { return }
-    store.select(providers[(i + delta + providers.count) % providers.count])
+    show(providers[(i + delta + providers.count) % providers.count])
+  }
+
+  // Not forced: a background-style refresh of every provider must not raise a
+  // Keychain prompt per provider. The per-provider Refresh stays user-initiated.
+  private func refreshAll() {
+    guard !isRefreshingAll else { return }
+    isRefreshingAll = true
+    Task {
+      await store.refreshAll()
+      isRefreshingAll = false
+    }
   }
 
   @ViewBuilder
@@ -83,43 +113,38 @@ struct DashboardView: View {
 
 private struct DashboardHeader: View {
   @Bindable var store: FenestraStore
-  @Environment(\.openSettings) private var openSettings
 
   var body: some View {
     HStack(spacing: 10) {
-        Picker("Provider", selection: providerSelection) {
-          ForEach(store.settings.enabledProviders) { providerID in
-            Label(providerID.displayName, systemImage: providerID.systemImage)
-              .labelStyle(.titleAndIcon)
-              .tag(providerID)
-          }
-        }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .help("Switch provider: ⌘[ / ⌘]. Jump to a provider: ⌘1–⌘9.")
-        .frame(minWidth: 190, alignment: .leading)
-        let isRefreshing = store.state(for: store.selectedProvider).availability == .loading
+      Button("All providers", systemImage: "chevron.left") {
+        store.settings.expandedPopover = false
+      }
+      .labelStyle(.iconOnly)
+      .help("All providers")
 
-        Button("Refresh", systemImage: "arrow.clockwise") {
-          Task { await store.refresh(store.selectedProvider, force: true) }
+      Picker("Provider", selection: providerSelection) {
+        ForEach(store.settings.enabledProviders) { providerID in
+          Label(providerID.displayName, systemImage: providerID.systemImage)
+            .labelStyle(.titleAndIcon)
+            .tag(providerID)
         }
-        .labelStyle(.iconOnly)
-        .help(isRefreshing ? "Refreshing…" : "Refresh")
-        .disabled(!store.settings.isEnabled(store.selectedProvider) || isRefreshing)
+      }
+      .labelsHidden()
+      .pickerStyle(.menu)
+      .help("Switch provider: ⌘[ / ⌘]. Jump to a provider: ⌘1–⌘9.")
+      .frame(minWidth: 190, alignment: .leading)
+      .fixedSize()
+      Spacer()
+      let isRefreshing = store.state(for: store.selectedProvider).availability == .loading
 
-        Button {
-          SettingsPresentation.open(using: openSettings)
-        } label: {
-          Label("Settings", systemImage: "gear")
-            .labelStyle(.iconOnly)
-        }
-        .help("Settings")
+      Button("Refresh", systemImage: "arrow.clockwise") {
+        Task { await store.refresh(store.selectedProvider, force: true) }
+      }
+      .labelStyle(.iconOnly)
+      .help(isRefreshing ? "Refreshing…" : "Refresh (⌘R)")
+      .disabled(!store.settings.isEnabled(store.selectedProvider) || isRefreshing)
 
-        Button("Compact", systemImage: "arrow.down.right.and.arrow.up.left") {
-          store.settings.expandedPopover = false
-        }
-        .labelStyle(.iconOnly)
-        .help("Use compact view")
+      DashboardMenu()
     }
     .padding(14)
   }
@@ -132,113 +157,184 @@ private struct DashboardHeader: View {
   }
 }
 
-private struct CompactDashboardView: View {
-  @Bindable var store: FenestraStore
+/// Settings and Quit, kept out of the way of the quota content.
+private struct DashboardMenu: View {
   @Environment(\.openSettings) private var openSettings
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      HStack {
-        Picker("Provider", selection: Binding(
-          get: { store.selectedProvider }, set: { store.select($0) }
-        )) {
-          ForEach(store.settings.enabledProviders) { provider in
-            Text(provider.displayName).tag(provider)
-          }
-        }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .help("Switch provider: ⌘[ / ⌘]. Jump to a provider: ⌘1–⌘9.")
-        Spacer()
-        Button("Refresh", systemImage: "arrow.clockwise") {
-          Task { await store.refresh(store.selectedProvider, force: true) }
-        }
-        .labelStyle(.iconOnly)
-        Button("Settings", systemImage: "gear") {
-          SettingsPresentation.open(using: openSettings)
-        }
-        .labelStyle(.iconOnly)
-        Button("Expand", systemImage: "arrow.up.left.and.arrow.down.right") {
-          store.settings.expandedPopover = true
-        }
-        .labelStyle(.iconOnly)
-      }
-
-      if let urgent = store.selectedMenuQuota {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("\(urgent.providerID.displayName) · \(urgent.windowName)")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-          Text("\(urgent.remainingPercent.formatted(.number.precision(.fractionLength(0))))% remaining")
-            .font(.title2.bold())
-          if store.isStale(store.selectedProvider) {
-            Label("Saved usage · refresh needed", systemImage: "exclamationmark.triangle")
-              .font(.caption)
-              .foregroundStyle(.orange)
-          } else if let prediction = urgent.prediction {
-            ForecastEvidenceView(prediction: prediction, reset: urgent.reset)
-          } else if let delta = urgent.paceDelta {
-            Text(PaceEvaluation(idealRemaining: 0, delta: delta, exhaustionPrediction: nil).label)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-          }
-        }
-      } else {
-        Text("Waiting for usage data")
-          .foregroundStyle(.secondary)
-      }
-
-      if let anomaly = store.history.activeAnomalies.first(where: { $0.providerID == store.selectedProvider }) {
-        Label(anomaly.kind.title, systemImage: "waveform.path.ecg.rectangle")
-          .font(.caption.weight(.semibold))
-          .foregroundStyle(anomaly.alertable ? .orange : .secondary)
-      }
-
+    Menu("More", systemImage: "ellipsis.circle") {
+      Button("Settings… (⌘,)") { SettingsPresentation.open(using: openSettings) }
       Divider()
-      VStack(alignment: .leading, spacing: 6) {
-        Text("Next resets").font(.caption.weight(.semibold))
-        ForEach(Array(store.resetTimeline.filter { $0.providerID == store.selectedProvider }.prefix(3))) { item in
-          HStack {
-            Text("\(item.providerID.displayName) · \(item.windowName)")
-            Spacer()
-            if let reset = item.reset {
-              Text(reset, format: .dateTime.weekday(.abbreviated).hour().minute())
-            } else {
-              Text("Unknown")
+      Button("Quit Fenestra (⌘Q)") { NSApplication.shared.terminate(nil) }
+    }
+    .labelStyle(.iconOnly)
+    .menuIndicator(.hidden)
+    .fixedSize()
+    .help("Settings and Quit")
+  }
+}
+
+/// Every enabled provider at a glance; a row opens that provider's charts.
+private struct OverviewView: View {
+  @Bindable var store: FenestraStore
+  let isRefreshing: Bool
+  let refreshAll: () -> Void
+
+  private static let rowHeight: CGFloat = 52
+
+  var body: some View {
+    let providers = store.settings.enabledProviders
+    VStack(spacing: 0) {
+      HStack(spacing: 10) {
+        Text("All providers").font(.headline)
+        Spacer()
+        if isRefreshing { ProgressView().controlSize(.small) }
+        Button("Refresh all", systemImage: "arrow.clockwise", action: refreshAll)
+          .labelStyle(.iconOnly)
+          .help(isRefreshing ? "Refreshing…" : "Refresh all (⌘R)")
+          .disabled(providers.isEmpty || isRefreshing)
+        DashboardMenu()
+      }
+      .padding(14)
+      Divider()
+      if providers.isEmpty {
+        ContentUnavailableView {
+          Label("No providers enabled", systemImage: "switch.2")
+        } description: {
+          Text("Enable at least one provider in Settings.")
+        }
+        .frame(height: 200)
+      } else {
+        ScrollView {
+          LazyVStack(spacing: 0) {
+            ForEach(Array(providers.enumerated()), id: \.element) { index, providerID in
+              OverviewRow(
+                providerID: providerID,
+                summary: store.quotaSummary(for: providerID, limiting: true),
+                state: store.state(for: providerID),
+                isStale: store.isStale(providerID),
+                shortcut: index < 9 ? "⌘\(index + 1)" : nil
+              ) {
+                store.select(providerID)
+                store.settings.expandedPopover = true
+              }
+              .frame(height: Self.rowHeight)
             }
           }
-          .font(.caption)
-          .foregroundStyle(.secondary)
         }
+        .frame(height: min(CGFloat(providers.count) * Self.rowHeight, 7 * Self.rowHeight))
       }
       Divider()
-      HStack {
-        Spacer()
-        Button("Quit") { NSApplication.shared.terminate(nil) }
-          .buttonStyle(.plain)
-          .foregroundStyle(.secondary)
-      }
+      DashboardFooter(store: store)
     }
-    .padding(14)
-    .frame(width: 420, height: 360, alignment: .top)
+    .frame(width: 420)
+  }
+}
+
+private struct OverviewRow: View {
+  let providerID: ProviderID
+  let summary: UrgentQuotaSummary?
+  let state: ProviderDisplayState
+  let isStale: Bool
+  let shortcut: String?
+  let open: () -> Void
+  @Environment(\.paceTheme) private var paceTheme
+  @State private var isHovered = false
+
+  var body: some View {
+    Button(action: open) {
+      HStack(spacing: 10) {
+        Image(systemName: providerID.systemImage)
+          .foregroundStyle(.secondary)
+          .frame(width: 20)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(providerID.displayName)
+          caption
+            .font(.caption)
+            .foregroundStyle(needsAttention ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+            .lineLimit(1)
+        }
+        Spacer(minLength: 8)
+        if let summary {
+          VStack(alignment: .trailing, spacing: 2) {
+            Text("\(summary.remainingPercent.formatted(.number.precision(.fractionLength(0))))% left")
+              .font(.body.weight(.semibold))
+              .monospacedDigit()
+            if let delta = summary.paceDelta {
+              let pace = PaceEvaluation(idealRemaining: 0, delta: delta, exhaustionPrediction: nil)
+              Text(pace.label)
+                .font(.caption)
+                .foregroundStyle(pace.label == "On pace"
+                  ? AnyShapeStyle(.secondary) : AnyShapeStyle(paceTheme.color(delta: delta)))
+            }
+          }
+        } else if state.availability == .loading {
+          ProgressView().controlSize(.small)
+        }
+        Image(systemName: "chevron.right")
+          .font(.caption)
+          .foregroundStyle(.tertiary)
+      }
+      .padding(.horizontal, 14)
+      .frame(maxHeight: .infinity)
+      .background(isHovered ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
+      .contentShape(.rect)
+    }
+    .buttonStyle(.plain)
+    .onHover { isHovered = $0 }
+    .help(shortcut.map { "Show \(providerID.displayName) charts (\($0))" }
+      ?? "Show \(providerID.displayName) charts")
+    .accessibilityElement(children: .combine)
+  }
+
+  private var needsAttention: Bool {
+    if isStale, summary != nil { return true }
+    if case .unavailable = state.availability { return true }
+    return false
+  }
+
+  @ViewBuilder
+  private var caption: some View {
+    if let summary {
+      if isStale {
+        Text("Saved usage · refresh needed")
+      } else if let reset = summary.reset {
+        Text("\(summary.windowName) · resets \(reset, format: .relative(presentation: .numeric))")
+      } else {
+        // Never invent a reset: say so when the provider gave no anchor.
+        Text("\(summary.windowName) · reset time unknown")
+      }
+    } else if case .unavailable(let message) = state.availability {
+      Text(message)
+    } else if state.snapshot != nil {
+      Text("No percentage quota")
+    } else {
+      Text("Waiting for usage data")
+    }
   }
 }
 
 private struct DashboardFooter: View {
-  let suggestion: String
+  let store: FenestraStore
 
   var body: some View {
-    HStack {
-      Label(suggestion, systemImage: "arrow.triangle.branch")
+    let suggestion = store.smartSuggestion
+    Button {
+      if let target = suggestion.target {
+        store.select(target)
+        store.settings.expandedPopover = true
+      }
+    } label: {
+      Label(suggestion.text, systemImage: "arrow.triangle.branch")
         .font(.callout)
         .foregroundStyle(.secondary)
-      Spacer()
-      Button("Quit") {
-        NSApplication.shared.terminate(nil)
-      }
-      .buttonStyle(.plain)
-      .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(.rect)
     }
+    .buttonStyle(.plain)
+    .allowsHitTesting(suggestion.target != nil)
+    .help(suggestion.target.map { "Show \($0.displayName)" } ?? suggestion.text)
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
   }

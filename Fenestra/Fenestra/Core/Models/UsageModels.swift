@@ -240,21 +240,11 @@ enum ExhaustionPredictionConfidence: String, Codable, Equatable, Sendable {
   case unstable
 }
 
-enum ExhaustionPredictionMethod: String, Codable, Equatable, Sendable {
-  case recent
-  case blended
-  case personalized
-}
-
 struct ExhaustionPrediction: Codable, Equatable, Sendable {
   let earliest: Date?
   let likely: Date?
   let latest: Date?
   let confidence: ExhaustionPredictionConfidence
-  let method: ExhaustionPredictionMethod
-  let exhaustionProbability: Double?
-  let evidenceCount: Int
-  let validationError: TimeInterval?
   let notificationEligible: Bool
 
   init(
@@ -262,20 +252,12 @@ struct ExhaustionPrediction: Codable, Equatable, Sendable {
     likely: Date?,
     latest: Date?,
     confidence: ExhaustionPredictionConfidence,
-    method: ExhaustionPredictionMethod = .recent,
-    exhaustionProbability: Double? = nil,
-    evidenceCount: Int = 0,
-    validationError: TimeInterval? = nil,
     notificationEligible: Bool = true
   ) {
     self.earliest = earliest
     self.likely = likely
     self.latest = latest
     self.confidence = confidence
-    self.method = method
-    self.exhaustionProbability = exhaustionProbability
-    self.evidenceCount = evidenceCount
-    self.validationError = validationError
     self.notificationEligible = notificationEligible
   }
 
@@ -400,15 +382,6 @@ struct ProviderHealthSummary: Equatable, Sendable {
   let resetAccuracy: TimeInterval?
   let activeRegime: SubscriptionRegime?
   let activeAnomalies: [UsageAnomaly]
-}
-
-struct ResetTimelineItem: Identifiable, Equatable, Sendable {
-  let providerID: ProviderID
-  let poolName: String
-  let windowName: String
-  let reset: Date?
-
-  var id: String { "\(providerID.rawValue)|\(poolName)|\(windowName)" }
 }
 
 struct UrgentQuotaSummary: Equatable, Sendable {

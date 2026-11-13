@@ -156,27 +156,46 @@ actor HistoryDatabase {
     limit: Int
   ) throws -> [HistoricalUsageWindow] {
     try prepare()
+    // A provider can revise its reset on each poll, so each poll may store a shifted report.
+    // A report is superseded by the next one when that next report starts before it ends AND
+    // either starts within 5 min of it (a drifted revision, or Codex's idle window that slides
+    // with every poll) or nothing was used before it (an idle placeholder). Otherwise the next
+    // report is an early reset and this one is a real session that ended early.
+    // The 5 min slack also absorbs back-to-back sessions whose start jitters ~1 min before
+    // the previous reported end (Claude), which used to merge and drop the earlier session.
     var sql = """
-      SELECT MIN(id), MIN(pool_id), MIN(window_id), MIN(kind), MIN(start), MAX(end),
-             MAX(quota_total), regime_id, MAX(plan_name), MAX(coverage)
-      FROM window_instances
-      WHERE provider = ? AND series_key = ? AND end <= ?
+      WITH reports AS (
+        SELECT *, LEAD(start) OVER (
+          PARTITION BY regime_id, kind, quota_total ORDER BY start, end, id
+        ) AS next_start
+        FROM window_instances WHERE provider = ? AND series_key = ?
       """
     if !includeOtherRegimes, regimeID != nil { sql += " AND regime_id = ?" }
     sql += """
-       GROUP BY ROUND(start / 5), ROUND(end / 5), regime_id
-       ORDER BY MAX(end) DESC LIMIT ?
+      )
+      SELECT id, pool_id, window_id, kind, start, end, quota_total, regime_id, plan_name, coverage,
+        next_start
+      FROM reports WHERE end <= ? AND (
+        next_start IS NULL OR next_start >= end - 300
+        OR (next_start - start >= 300 AND EXISTS (
+          SELECT 1 FROM usage_samples s
+          WHERE s.provider = reports.provider AND s.series_key = reports.series_key
+            AND s.timestamp >= reports.start AND s.timestamp < reports.next_start
+            AND s.remaining < 100
+        ))
+      )
+      ORDER BY end DESC LIMIT ?
       """
     return try withStatement(sql) { statement in
       bind(providerID.rawValue, to: 1, in: statement)
       bind(seriesKey, to: 2, in: statement)
-      bind(Date().timeIntervalSince1970, to: 3, in: statement)
-      var index: Int32 = 4
+      var index: Int32 = 3
       if !includeOtherRegimes, let regimeID {
         bind(regimeID.uuidString, to: index, in: statement)
         index += 1
       }
-      bind(limit, to: index, in: statement)
+      bind(Date().timeIntervalSince1970, to: index, in: statement)
+      bind(limit, to: index + 1, in: statement)
       var windows: [HistoricalUsageWindow] = []
       while sqlite3_step(statement) == SQLITE_ROW {
         guard let id = UUID(uuidString: text(statement, 0)),
@@ -185,11 +204,13 @@ actor HistoryDatabase {
         let start = Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
         let end = Date(timeIntervalSince1970: sqlite3_column_double(statement, 5))
         let windowRegimeID = optionalUUID(statement, 7)
+        // An early-reset session stops at the next window's start; later samples belong to it.
+        let samplesEnd = optionalDate(statement, 10).map { min($0, end) } ?? end
         let samples = try samples(
           providerID: providerID,
           seriesKey: seriesKey,
           start: start,
-          end: end,
+          end: samplesEnd,
           regimeID: windowRegimeID
         )
         let expectedSamples = max(1, end.timeIntervalSince(start) / 600)
@@ -213,23 +234,6 @@ actor HistoryDatabase {
       }
       return windows
     }
-  }
-
-  func comparableWindows(
-    providerID: ProviderID,
-    seriesKey: String,
-    regimeID: UUID,
-    before date: Date = .distantFuture,
-    limit: Int = 64
-  ) throws -> [HistoricalUsageWindow] {
-    let all = try historicalWindows(
-      providerID: providerID,
-      seriesKey: seriesKey,
-      regimeID: regimeID,
-      includeOtherRegimes: false,
-      limit: limit
-    )
-    return all.filter { $0.end < date && $0.observationCoverage >= 0.6 && $0.samples.count >= 2 }
   }
 
   func activeRegime(providerID: ProviderID) throws -> SubscriptionRegime? {

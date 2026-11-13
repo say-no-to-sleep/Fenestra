@@ -43,7 +43,7 @@ The app is a thin native shell around a pinned upstream engine. **`CodexBarCore`
 Data flows in one direction:
 
 1. **`FenestraApp`** (`App/`) declares a `MenuBarExtra` (window style, no Dock icon) plus a `Settings` scene, both fed by a single `@State FenestraStore`.
-2. **`FenestraStore`** (`Core/Store/`) is the `@Observable @MainActor` hub and the single source of truth. It owns providers, per-provider polling `Task`s, `AppSettings`, `HistoryStore`, `NotificationManager`, `AnomalyDetector`, and personalized predictions. It reacts to `NSWorkspace.didWakeNotification` by force-refreshing all providers (timers don't fire while asleep), and debounces settings changes (300ms) before reconfiguring.
+2. **`FenestraStore`** (`Core/Store/`) is the `@Observable @MainActor` hub and the single source of truth. It owns providers, per-provider polling `Task`s, `AppSettings`, `HistoryStore`, `NotificationManager`, and `AnomalyDetector`. Polling backs off (2× per consecutive failure, up to 16×, capped at 15 min) for providers that keep failing. It reacts to `NSWorkspace.didWakeNotification` by force-refreshing all providers (timers don't fire while asleep), and debounces settings changes (300ms) before reconfiguring.
 3. **`UsageProvider`** (`Providers/UsageProvider.swift`) is the local protocol: `currentSnapshot() async throws -> UsageSnapshot`. In practice the only concrete implementation is **`CodexBarProvider`**, one instance per `ProviderID`.
 4. **`CodexBarProvider`** (`Providers/CodexBar/`) is the bridge/adapter. It builds a `ProviderFetchContext`, calls the pinned core's descriptor `fetch`, and **`map(...)`s** the core result into the app's `UsageSnapshot`. This mapping layer holds the provider-specific quirks — treat it as the seam between "upstream shape" and "our model."
 
@@ -68,8 +68,7 @@ Source-mode selection matters here: `.oauth`/`.auto` read the Keychain (each pol
 
 ### Pace math and forecasting (`Core/PaceMath/`)
 
-- `PaceCalculator` computes ideal linear decay, the actual-vs-ideal `delta` (positive = under pace = good/green; negative = over pace = bad/red), and a baseline exhaustion prediction from a recent rolling lookback (~2h in the store), not the whole-window average.
-- `PersonalizedForecaster` refines the baseline using comparable historical windows, **partitioned by subscription profile** so paid/free tiers don't mix. Early-learning predictions are gated out of notifications.
+- `PaceCalculator` computes ideal linear decay, the actual-vs-ideal `delta` (positive = under pace = good/green; negative = over pace = bad/red), and an exhaustion prediction extrapolated from the average burn since the window opened (±20% band). It is deliberately simple: the earlier rolling-rate + personalized forecaster went blank whenever usage paused and was the app's biggest CPU cost.
 - `AnomalyDetector` tracks provider reliability/health and requires two confirming refreshes before an anomaly is alertable.
 
 ### Persistence (`Core/Persistence/`)

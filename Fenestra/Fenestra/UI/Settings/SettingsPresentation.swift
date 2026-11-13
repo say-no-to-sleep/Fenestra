@@ -24,7 +24,11 @@ enum SettingsPresentation {
 
   @MainActor
   static var settingsWindow: NSWindow? {
-    NSApp.windows.first { $0.title.localizedCaseInsensitiveContains("settings") }
+    // The identifier is checked too: the title need not stay "… Settings" once panes exist.
+    NSApp.windows.first {
+      $0.title.localizedCaseInsensitiveContains("settings")
+        || $0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") == true
+    }
   }
 
   @MainActor

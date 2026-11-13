@@ -28,14 +28,20 @@ the first time if Gatekeeper asks.
 
 - Dashed even-spend line and observed remaining-quota line
 - Green/red pace difference
-- Confidence-aware recent and locally personalized exhaustion forecasts
+- Simple exhaustion forecast: average burn since the window opened, ±20%
 - 5-hour and weekly windows where a provider reports them
 - Provider-specific rate, spend, credit, and subscription windows
 - One year of local usage history with previous-window browsing and comparison
-- Reset timeline, anomaly detection, and provider reliability health
+- All-providers overview with each provider's tightest quota, pace, and reset
+- Anomaly detection
 
-The dashboard opens directly to quota charts without page tabs. The menu bar
-and compact view summarize the selected provider's main quota. Browse previous
+The overview lists every enabled provider with its tightest main quota, pace,
+and time to reset; click a row (or press ⌘1–⌘9) for that provider's quota
+charts, which have no page tabs. The footer names the provider with the most
+headroom and switches to it when clicked. The menu bar shows the selected
+provider's main quota, or, with Settings → General → Menu bar, the provider
+furthest over pace; the provider name can be hidden to save space. ⌘R
+refreshes, ⌘, opens Settings, and ⌘Q quits. Browse previous
 windows using each card's history controls; uncertain outcomes are marked as
 unknown. Additional Codex model quotas can be expanded beneath the main quota.
 Drag a box on a pace chart to zoom time and remaining quota together; a
@@ -93,6 +99,8 @@ clients validate credential-bearing endpoint overrides, require HTTPS where
 appropriate, and scope cookies/tokens to the corresponding provider. Local
 probes use loopback or provider CLIs.
 
+Previous-window navigation groups overlapping reports of a quota window so reset-time revisions do not create a session per refresh. It keeps the latest reported timeline and leaves the raw history intact. Windows without matching usage samples show “No recorded usage data” instead of a chart, usage statistics, or comparison controls.
+
 Usage history is stored in a WAL-mode SQLite database. On first launch after an
 upgrade, Fenestra transactionally imports `history.json` once and leaves that
 file untouched as a fallback. Usage samples and completed windows are retained
@@ -108,13 +116,12 @@ require two consecutive threshold crossings. Exhaustion-before-reset alerts use
 time-sensitive delivery only when macOS reports it as enabled; otherwise they
 fall back to normal active notifications.
 
-Personalized forecasts cannot trigger notifications while they are still in
-the early-learning stage. Alertable anomalies also require two confirming
+Alertable anomalies require two confirming
 refreshes and always use ordinary notification priority.
 
 ## Debugging
 
-Settings → Show debug log reveals:
+Settings → General → Data → Show Log reveals:
 
 `~/Library/Application Support/Fenestra/fenestra.log`
 
